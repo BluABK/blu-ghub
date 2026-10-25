@@ -140,9 +140,15 @@ pub fn init_logging(keep_days: u64) -> tracing_appender::non_blocking::WorkerGua
         }
     };
     // Most of the code lives in the library crate, whose log target is
-    // `blu_ghub`; name it, or its debug lines never reach the file.
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,blu_ghub=debug,BluGHub=debug"));
+    // `blu_ghub`; name it, or its debug lines never reach the file. The
+    // settings window's graphics stack is chatty at info (every open lists
+    // the GPUs), so it only gets to report problems.
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new(
+            "info,blu_ghub=debug,BluGHub=debug,wgpu_core=warn,wgpu_hal=warn,naga=warn,\
+             egui_wgpu=warn,eframe=warn,egui_winit=warn,winit=warn",
+        )
+    });
     let file = fmt::layer().with_ansi(false).with_target(false).with_writer(writer);
     let stderr = fmt::layer().with_target(false).with_writer(std::io::stderr);
     tracing_subscriber::registry().with(filter).with(file).with(stderr).init();

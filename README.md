@@ -27,12 +27,19 @@ A tray icon. Hover it for both devices' battery; click it for the menu:
 G915: 91%
 G935: 76%
 ---------------------
+Settings…
 Read batteries now
 Start with Windows
 Open log folder
 ---------------------
 Quit
 ```
+
+**Settings…** opens a window with each device's state, battery, voltage and
+how old the reading is (for now that is all it shows). The window exists only
+while it is open: closing it frees its renderer, and the Direct3D driver hands
+its memory back some seconds later. While open and untouched it draws
+nothing; only the graphics driver keeps time with the display.
 
 A sleeping keyboard shows its last reading ("asleep (last 91%)"), a headset
 that is switched off likewise. When a battery drops to the warning level a
@@ -56,7 +63,7 @@ Between those moments the app is idle: its main thread waits for Windows
 messages and each device's worker waits for that device, with no timers.
 
 **Running it.** `BluGHub.exe` starts it; starting it again while it runs
-just shows a notification. `BluGHub --quit` stops a running instance and
+opens the settings window. `BluGHub --quit` stops a running instance and
 waits until it has. "Start with Windows" adds a per-user Run entry
 (`BluGHub --hidden`). Release builds put a shortcut in the Start Menu under
 *Blu Software*.

@@ -14,6 +14,7 @@
 //! rather than panicking.
 
 pub mod devices;
+mod settings;
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
@@ -34,8 +35,11 @@ use windows::Win32::Foundation::{
     WAIT_ABANDONED_0, WAIT_OBJECT_0, WPARAM,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::ProcessStatus::{
+    GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
+};
 use windows::Win32::System::Threading::{
-    CreateMutexW, OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+    CreateMutexW, GetCurrentProcess, OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
 };
 use windows::Win32::UI::Shell::{
     NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIIF_INFO, NIIF_WARNING, NIM_ADD,
@@ -69,6 +73,10 @@ const WM_APP_DEVCHANGE: u32 = WM_APP + 3;
 const WM_APP_SHOW: u32 = WM_APP + 4;
 /// The HID++ lock another process held has been released to us.
 const WM_APP_LOCKED: u32 = WM_APP + 5;
+/// Open the settings window (posted to self, so it opens outside whatever
+/// asked for it). `wparam` > 0: the `--settings-gate` measurement, that many
+/// open/close cycles.
+const WM_APP_SETTINGS: u32 = WM_APP + 6;
 
 const TRAY_ID: u32 = 1;
 /// Hotplug sends a burst of arrivals (one per HID collection); act once, a
@@ -80,11 +88,16 @@ const DEVCHANGE_DELAY_MS: u32 = 400;
 const TRAY_RETRY_TIMER: usize = 2;
 const TRAY_RETRY_MS: u32 = 3000;
 const TRAY_RETRIES: u8 = 20;
+/// The `--settings-gate` measurement's next step, a while after each close:
+/// the Direct3D driver frees a closed window's memory some seconds late.
+const GATE_TIMER: usize = 3;
+const GATE_SETTLE_MS: u32 = 10_000;
 
 const IDM_AUTOSTART: usize = 10;
 const IDM_LOGS: usize = 11;
 const IDM_REFRESH: usize = 12;
 const IDM_QUIT: usize = 13;
+const IDM_SETTINGS: usize = 14;
 
 struct App {
     hwnd: HWND,
@@ -107,6 +120,11 @@ thread_local! {
     /// Kept outside `APP` so every unrelated message can be checked against
     /// it without borrowing the app state.
     static TASKBAR_CREATED: Cell<u32> = const { Cell::new(0) };
+    /// The app was told to quit while the settings window was open: the
+    /// message loop ends once that window has closed.
+    static QUIT_AFTER_SETTINGS: Cell<bool> = const { Cell::new(false) };
+    /// `--settings-gate`: cycles done, cycles wanted.
+    static GATE: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
 }
 
 /// The lock handed over by the waiter thread, collected on WM_APP_LOCKED.
@@ -287,6 +305,12 @@ pub fn run(args: &[String]) -> Result<()> {
     with_app(|a| a.tray_add());
     let hotplug = register_hotplug(hwnd);
     with_app(|a| a.reconcile_workers());
+    if let Some(i) = args.iter().position(|a| a == "--settings-gate") {
+        let cycles = args.get(i + 1).and_then(|n| n.parse().ok()).unwrap_or(20usize).max(1);
+        unsafe {
+            let _ = PostMessageW(Some(hwnd), WM_APP_SETTINGS, WPARAM(cycles), LPARAM(0));
+        }
+    }
 
     let mut msg = MSG::default();
     while unsafe { GetMessageW(&mut msg, None, 0, 0) }.as_bool() {
@@ -400,11 +424,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         .then(|| a.shared.lock().unwrap_or_else(|e| e.into_inner()).clone())
                 });
                 if let Some(Some(status)) = snapshot {
-                    let cmd = show_menu(hwnd, &status, point_from(wparam.0));
-                    if cmd == IDM_LOGS {
-                        open_logs_folder();
-                    } else {
-                        with_app(|a| a.on_command(cmd));
+                    match show_menu(hwnd, &status, point_from(wparam.0)) {
+                        IDM_LOGS => open_logs_folder(),
+                        IDM_SETTINGS => open_settings(None),
+                        cmd => {
+                            with_app(|a| a.on_command(cmd));
+                        }
                     }
                 }
             }
@@ -412,6 +437,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_APP_STATE => {
             with_app(|a| a.on_state());
+            settings::refresh();
             LRESULT(0)
         }
         WM_APP_DEVCHANGE => {
@@ -429,15 +455,33 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             with_app(|a| a.tray_add());
             LRESULT(0)
         }
+        WM_TIMER if wparam.0 == GATE_TIMER => {
+            unsafe {
+                let _ = KillTimer(Some(hwnd), GATE_TIMER);
+            }
+            settings_gate_step(hwnd);
+            LRESULT(0)
+        }
         WM_APP_SHOW => {
-            let alive = with_app(|a| {
-                if a.shut_down {
-                    return false;
+            // A second launch: show the settings window. Posted, as this is
+            // answering another process, which waits.
+            let alive = with_app(|a| !a.shut_down).unwrap_or(false);
+            if alive {
+                unsafe {
+                    let _ = PostMessageW(Some(hwnd), WM_APP_SETTINGS, WPARAM(0), LPARAM(0));
                 }
-                a.balloon("BluGHub is already running", "It lives here in the tray.", false);
-                true
-            });
-            LRESULT(alive.unwrap_or(false) as isize)
+            }
+            LRESULT(alive as isize)
+        }
+        WM_APP_SETTINGS => {
+            match wparam.0 {
+                0 => open_settings(None),
+                cycles => {
+                    GATE.with(|g| g.set((0, cycles)));
+                    settings_gate_step(hwnd);
+                }
+            }
+            LRESULT(0)
         }
         WM_APP_LOCKED => {
             let lock = HANDED_LOCK.lock().unwrap_or_else(|e| e.into_inner()).take();
@@ -480,7 +524,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_DESTROY => {
             with_app(|a| a.shutdown());
-            unsafe { PostQuitMessage(0) };
+            if settings::is_open() {
+                // This is running inside the settings window's own message
+                // loop: close the window, and end ours once it has returned.
+                QUIT_AFTER_SETTINGS.with(|q| q.set(true));
+                settings::close();
+            } else {
+                unsafe { PostQuitMessage(0) };
+            }
             LRESULT(0)
         }
         _ => {
@@ -496,6 +547,63 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
+    }
+}
+
+/// Open the settings window and return once it is closed. Outside the
+/// app-state borrow: the window runs a message loop of its own, which
+/// dispatches this window's messages meanwhile.
+fn open_settings(auto_close: Option<Duration>) {
+    let Some(Some(shared)) = with_app(|a| (!a.shut_down).then(|| a.shared.clone())) else {
+        return;
+    };
+    if let Err(e) = settings::run(shared, auto_close) {
+        warn!("{e:#}");
+    }
+    if !settings::is_open() && QUIT_AFTER_SETTINGS.with(|q| q.replace(false)) {
+        unsafe { PostQuitMessage(0) };
+    }
+}
+
+/// `--settings-gate [N]`: open the settings window for 3 s and close it, N
+/// times (20 by default), logging the process's private memory before the
+/// first and 10 s after each close, to show that a closed window gives its
+/// memory back and that repeated opening does not add up.
+fn settings_gate_step(hwnd: HWND) {
+    let (done, total) = GATE.with(|g| g.get());
+    if done == 0 {
+        info!("settings gate: private memory {} before", private_memory());
+    } else {
+        info!("settings gate: private memory {} 10 s after close {done}", private_memory());
+    }
+    if done == total {
+        info!("settings gate: {total} cycles done");
+        return;
+    }
+    open_settings(Some(Duration::from_secs(3)));
+    if QUIT_AFTER_SETTINGS.with(|q| q.get()) || with_app(|a| a.shut_down).unwrap_or(true) {
+        return;
+    }
+    GATE.with(|g| g.set((done + 1, total)));
+    unsafe { SetTimer(Some(hwnd), GATE_TIMER, GATE_SETTLE_MS, None) };
+}
+
+/// This process's private memory, as "12.3 MiB".
+fn private_memory() -> String {
+    let mut c = PROCESS_MEMORY_COUNTERS_EX {
+        cb: std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
+        ..Default::default()
+    };
+    let ok = unsafe {
+        GetProcessMemoryInfo(
+            GetCurrentProcess(),
+            (&mut c as *mut PROCESS_MEMORY_COUNTERS_EX).cast::<PROCESS_MEMORY_COUNTERS>(),
+            c.cb,
+        )
+    };
+    match ok {
+        Ok(()) => format!("{:.1} MiB", c.PrivateUsage as f64 / (1024.0 * 1024.0)),
+        Err(e) => format!("unknown ({e})"),
     }
 }
 
@@ -730,6 +838,7 @@ fn show_menu(hwnd: HWND, status: &Status, at: POINT) -> usize {
             let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 100 + i, &line);
         }
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        let _ = AppendMenuW(menu, MF_STRING, IDM_SETTINGS, w!("Settings…"));
         let _ = AppendMenuW(menu, MF_STRING, IDM_REFRESH, w!("Read batteries now"));
         let autostart = if platform::starts_with_windows() { MF_CHECKED } else { MF_STRING };
         let _ = AppendMenuW(menu, MF_STRING | autostart, IDM_AUTOSTART, w!("Start with Windows"));
