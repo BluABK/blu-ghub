@@ -34,6 +34,23 @@ impl Default for Settings {
 }
 
 impl Config {
+    /// Clamp hand-edited values into sane ranges, saying so in the log.
+    pub fn sanitized(mut self) -> Config {
+        let s = &mut self.settings;
+        let clamp = |name: &str, v: u64, lo: u64, hi: u64| -> u64 {
+            let c = v.clamp(lo, hi);
+            if c != v {
+                tracing::warn!("config: {name} = {v} is out of range; using {c}");
+            }
+            c
+        };
+        s.low_battery_percent =
+            clamp("low_battery_percent", s.low_battery_percent as u64, 0, 100) as u8;
+        s.battery_check_minutes = clamp("battery_check_minutes", s.battery_check_minutes, 5, 1440);
+        s.log_retention_days = clamp("log_retention_days", s.log_retention_days, 1, 3650);
+        self
+    }
+
     /// A missing file is a first run: defaults. An unreadable or invalid one
     /// is an error, so the caller can say so and refuse to overwrite it.
     pub fn load(path: &Path) -> Result<Config> {
@@ -61,6 +78,19 @@ mod tests {
         let c: Config = toml::from_str("[settings]\nlow_battery_percent = 25\n").unwrap();
         assert_eq!(c.settings.low_battery_percent, 25);
         assert_eq!(c.settings.battery_check_minutes, 30);
+    }
+
+    #[test]
+    fn out_of_range_values_are_clamped() {
+        let c: Config = toml::from_str(
+            "[settings]\nlow_battery_percent = 250\nbattery_check_minutes = 0\nlog_retention_days = 0\n",
+        )
+        .unwrap();
+        let s = c.sanitized().settings;
+        assert_eq!(
+            (s.low_battery_percent, s.battery_check_minutes, s.log_retention_days),
+            (100, 5, 1)
+        );
     }
 
     #[test]

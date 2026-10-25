@@ -11,9 +11,62 @@ and never sits in the keystroke path.
 
 ## Status
 
-Diagnostics only, so far. The first job is evidence: whether G HUB (or the
-Logitech driver it installs) is what causes repeated or stuck keys, and what
-the devices actually send. The tray app comes next.
+- **BluGHub** (the tray app): battery levels for the G915 and G935.
+- **BluGHub-diag**: the diagnostics used to work out what the devices do.
+
+Lighting, G-keys and headset buttons come next. Until then the keyboard runs
+on what its on-board memory holds, which keeps working with nothing installed.
+
+## BluGHub
+
+A tray icon. Hover it for both devices' battery; click it for the menu:
+
+```
+G915: 91%
+G935: 76%
+---------------------
+Read batteries now
+Start with Windows
+Open log folder
+---------------------
+Quit
+```
+
+A sleeping keyboard shows its last reading ("asleep (last 91%)"), a headset
+that is switched off likewise. When a battery drops to the warning level a
+notification says so, once, until it has been charged again.
+
+**What it sends to the devices.** HID++ *read* requests, and only:
+
+- when a device connects or wakes up (the receiver announces it),
+- when you pick "Read batteries now", or after the PC resumes,
+- as a fallback every 30 minutes while a device is awake.
+
+Both devices also report battery changes on their own, so the fallback rarely
+matters. Nothing is sent to a sleeping keyboard or a switched-off headset; the
+app waits for them to announce themselves. The one write is to the receiver,
+not the keyboard: turning on its connection notifications if a replug has
+turned them off (G HUB used to do this).
+
+Between those moments the app is idle: its main thread waits for Windows
+messages and each device's worker waits for that device, with no timers.
+
+**Running it.** `BluGHub.exe` starts it; starting it again while it runs
+just shows a notification. `BluGHub --quit` stops a running instance and
+waits until it has. "Start with Windows" adds a per-user Run entry
+(`BluGHub --hidden`). Release builds put a shortcut in the Start Menu under
+*Blu Software*.
+
+**Config**: `%APPDATA%\BluGHub\BluGHub.toml`, every field optional:
+
+```toml
+[settings]
+low_battery_percent = 20     # 0 = no warning
+battery_check_minutes = 60   # the fallback reading, 5-1440
+log_retention_days = 14
+```
+
+**Logs**: `%APPDATA%\BluGHub\logs\BluGHub.log.<date>`, one file a day.
 
 ## BluGHub-diag
 

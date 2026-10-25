@@ -49,32 +49,30 @@ pub fn run() -> Result<()> {
     let mut any = false;
 
     for pid in [0xC547u16, 0xC541] {
-        let cols = hidpp::hidpp_collections(&all, pid);
-        if cols.is_empty() {
-            continue;
-        }
-        any = true;
-        out.line(&format!("\n=== LIGHTSPEED receiver {pid:04X} ==="));
-        let mut ch = Channel::open(&cols, "receiver")?;
-        probe_receiver(&mut out, &mut ch);
-        for dev in 1..=6u8 {
-            match ch.ping(dev) {
-                Ok((maj, min)) => {
-                    out.line(&format!(
-                        "\n--- device {dev} behind the receiver: HID++ {maj}.{min} ---"
-                    ));
-                    if maj >= 2 {
-                        probe_device(&mut out, &mut ch, dev);
+        for cols in hidpp::hidpp_groups(&all, pid) {
+            any = true;
+            out.line(&format!("\n=== LIGHTSPEED receiver {pid:04X} ==="));
+            let mut ch = Channel::open(&cols, "receiver")?;
+            probe_receiver(&mut out, &mut ch);
+            for dev in 1..=6u8 {
+                match ch.ping(dev) {
+                    Ok((maj, min)) => {
+                        out.line(&format!(
+                            "\n--- device {dev} behind the receiver: HID++ {maj}.{min} ---"
+                        ));
+                        if maj >= 2 {
+                            probe_device(&mut out, &mut ch, dev);
+                        }
                     }
+                    Err(HidppError::Offline(c)) => {
+                        out.line(&format!("  device {dev}: paired but asleep/off (error {c:02X})"))
+                    }
+                    Err(HidppError::Error10(0x08)) | Err(HidppError::Error10(0x02)) => {}
+                    Err(e) => out.line(&format!("  device {dev}: {e}")),
                 }
-                Err(HidppError::Offline(c)) => {
-                    out.line(&format!("  device {dev}: paired but asleep/off (error {c:02X})"))
-                }
-                Err(HidppError::Error10(0x08)) | Err(HidppError::Error10(0x02)) => {}
-                Err(e) => out.line(&format!("  device {dev}: {e}")),
             }
+            report_unsolicited(&mut out, &mut ch);
         }
-        report_unsolicited(&mut out, &mut ch);
     }
 
     let wired = hidpp::hidpp_collections(&all, 0xC33E);

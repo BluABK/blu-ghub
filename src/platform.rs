@@ -75,6 +75,9 @@ fn auto_launch() -> Result<auto_launch::AutoLaunch> {
         .set_app_name(APP_NAME)
         .set_app_path(&exe.display().to_string())
         .set_args(&["--hidden"])
+        // Per user only: run elevated, the default would write the
+        // all-users Run key, which the app then cannot remove unelevated.
+        .set_windows_enable_mode(auto_launch::WindowsEnableMode::CurrentUser)
         .build()
         .map_err(|e| anyhow!("{e}"))
 }
@@ -89,14 +92,26 @@ pub fn set_start_with_windows(on: bool) -> Result<()> {
     if on { a.enable() } else { a.disable() }.map_err(|e| anyhow!("{e}"))
 }
 
-/// Logging to `%APPDATA%\BluGHub\logs\BluGHub.log.<date>`, one file a day.
-/// Keep the returned guard alive: dropping it stops the writer.
+/// Logging to `%APPDATA%\BluGHub\logs\BluGHub.log.<date>`, one file a day,
+/// old ones removed at start-up and at each daily rollover. If the folder
+/// cannot be written, the app still runs (logging to nowhere). Keep the
+/// returned guard alive: dropping it stops the writer.
 pub fn init_logging(keep_days: u64) -> tracing_appender::non_blocking::WorkerGuard {
     let dir = app_paths::logs_dir();
     app_paths::ensure_dir(&dir);
     prune_old_logs(&dir, keep_days);
-    let (writer, guard) =
-        tracing_appender::non_blocking(tracing_appender::rolling::daily(&dir, "BluGHub.log"));
+    let appender = tracing_appender::rolling::Builder::new()
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .filename_prefix("BluGHub.log")
+        .max_log_files(keep_days.max(1) as usize)
+        .build(&dir);
+    let (writer, guard) = match appender {
+        Ok(a) => tracing_appender::non_blocking(a),
+        Err(e) => {
+            eprintln!("log file unavailable ({e}); continuing without one");
+            tracing_appender::non_blocking(std::io::sink())
+        }
+    };
     // Most of the code lives in the library crate, whose log target is
     // `blu_ghub`; name it, or its debug lines never reach the file.
     let filter = EnvFilter::try_from_default_env()
@@ -113,7 +128,7 @@ pub fn init_logging(keep_days: u64) -> tracing_appender::non_blocking::WorkerGua
 fn prune_old_logs(dir: &std::path::Path, keep_days: u64) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     let Some(cutoff) = std::time::SystemTime::now()
-        .checked_sub(std::time::Duration::from_secs(keep_days.max(1) * 86400))
+        .checked_sub(std::time::Duration::from_secs(keep_days.max(1).saturating_mul(86400)))
     else {
         return;
     };

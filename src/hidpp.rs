@@ -218,8 +218,11 @@ pub enum Event {
     Control(u8),
 }
 
-/// Holds the machine-wide "I am talking HID++ to these devices" lock, so two
-/// blu-ghub processes (the tray app and a probe) never interleave requests.
+/// The "I am talking HID++ to these devices" lock, so two blu-ghub processes
+/// (the tray app and a probe) never interleave requests. It is the named
+/// mutex's *existence* that counts: whoever created it holds the lock until
+/// its last handle closes. In the Global namespace, so it also covers a
+/// second session on the same machine.
 pub struct HidppLock(HANDLE);
 
 unsafe impl Send for HidppLock {}
@@ -232,16 +235,64 @@ impl Drop for HidppLock {
     }
 }
 
+/// Take the lock, or fail if another blu-ghub process has it.
 pub fn acquire_lock() -> Result<HidppLock> {
-    let h = unsafe { CreateMutexW(None, true, w!("Local\\BluGHub.hidpp")) }
+    match try_lock()? {
+        LockState::Acquired(l) => Ok(l),
+        LockState::Busy(_) => {
+            bail!("another blu-ghub process is talking to the devices (quit the tray app first)")
+        }
+    }
+}
+
+pub enum LockState {
+    Acquired(HidppLock),
+    /// Another process has it; this handle can wait for it to go.
+    Busy(BusyLock),
+}
+
+pub fn try_lock() -> Result<LockState> {
+    // Created owned: a process that only probes keeps it owned until it exits,
+    // so a waiter can tell when it is gone.
+    let h = unsafe { CreateMutexW(None, true, w!("Global\\BluGHub.hidpp")) }
         .context("creating the HID++ lock")?;
     if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
-        unsafe {
-            let _ = CloseHandle(h);
-        }
-        bail!("another blu-ghub process is talking to the devices (quit the tray app first)");
+        return Ok(LockState::Busy(BusyLock(h)));
     }
-    Ok(HidppLock(h))
+    Ok(LockState::Acquired(HidppLock(h)))
+}
+
+/// A handle to a lock someone else holds.
+pub struct BusyLock(HANDLE);
+
+unsafe impl Send for BusyLock {}
+
+impl BusyLock {
+    /// Block until the holder exits (its ownership is then abandoned to us),
+    /// or until `stop` is signalled. On success this process holds the lock.
+    pub fn wait(self, stop: HANDLE) -> Option<HidppLock> {
+        use windows::Win32::Foundation::{WAIT_ABANDONED_0, WAIT_OBJECT_0};
+        use windows::Win32::System::Threading::{INFINITE, WaitForMultipleObjects};
+        let h = self.0;
+        std::mem::forget(self);
+        let r = unsafe { WaitForMultipleObjects(&[h, stop], false, INFINITE) };
+        if r == WAIT_OBJECT_0 || r == WAIT_ABANDONED_0 {
+            Some(HidppLock(h))
+        } else {
+            unsafe {
+                let _ = CloseHandle(h);
+            }
+            None
+        }
+    }
+}
+
+impl Drop for BusyLock {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseHandle(self.0);
+        }
+    }
 }
 
 struct Endpoint {
@@ -275,46 +326,58 @@ impl Channel {
             .ok_or_else(|| anyhow!("{label}: no long (20-byte) HID++ collection"))?;
         let short_info = collections.iter().find(|i| i.output_len as usize == SHORT_LEN);
 
-        let stop = StopEvent::new()?;
-        let stop_raw = stop.raw().0 as isize;
-        let (tx, rx) = mpsc::channel();
-        let mut readers = Vec::new();
-        let mut open_one = |info: &HidInfo, n: usize| -> Result<Endpoint> {
-            let h = std::sync::Arc::new(hid::open_rw(&info.path)?);
-            let reader = h.clone();
-            let tx = tx.clone();
-            let len = info.input_len as usize;
-            readers.push(std::thread::Builder::new().name(format!("hidpp-read-{n}")).spawn(
-                move || {
-                    let stop = HANDLE(stop_raw as *mut _);
-                    if let hid::ReaderEnd::Gone(why) = hid::read_reports(n, &reader, len, stop, &tx)
-                    {
-                        let report =
-                            Report { endpoint: GONE, at: Instant::now(), data: why.into_bytes() };
-                        let _ = tx.send(report);
-                    }
-                },
-            )?);
-            Ok(Endpoint { handle: h, out_len: info.output_len as usize })
-        };
-        let long = open_one(long_info, 0)?;
-        let short = match short_info {
-            Some(i) => Some(open_one(i, 1)?),
+        // Every handle first, then the channel, then the readers: if anything
+        // fails after a reader is running, dropping the channel stops and
+        // joins it (and only then closes the event it waits on).
+        let long_h = std::sync::Arc::new(hid::open_rw(&long_info.path)?);
+        let short_h = match short_info {
+            Some(i) => Some(std::sync::Arc::new(hid::open_rw(&i.path)?)),
             None => None,
         };
-        Ok(Channel {
-            short,
-            long,
+        let (tx, rx) = mpsc::channel();
+        let mut ch = Channel {
+            short: short_h
+                .as_ref()
+                .zip(short_info)
+                .map(|(h, i)| Endpoint { handle: h.clone(), out_len: i.output_len as usize }),
+            long: Endpoint { handle: long_h.clone(), out_len: long_info.output_len as usize },
             rx,
             tx,
-            stop,
-            readers,
+            stop: StopEvent::new()?,
+            readers: Vec::new(),
             queued: VecDeque::new(),
             controls: VecDeque::new(),
             gone: false,
             label: label.to_string(),
-            timeout: Duration::from_millis(1000),
-        })
+            // A keyboard in power saving takes about a second to answer its first
+            // request (measured: 989 ms); 1 s would sometimes mistake it for
+            // asleep. Solaar allows 4 s for devices behind a receiver.
+            timeout: Duration::from_secs(3),
+        };
+        ch.spawn_reader(0, long_h, long_info.input_len as usize)?;
+        if let (Some(h), Some(i)) = (short_h, short_info) {
+            ch.spawn_reader(1, h, i.input_len as usize)?;
+        }
+        Ok(ch)
+    }
+
+    fn spawn_reader(
+        &mut self,
+        n: usize,
+        handle: std::sync::Arc<OwnedHandle>,
+        len: usize,
+    ) -> Result<()> {
+        let stop_raw = self.stop.raw().0 as isize;
+        let tx = self.tx.clone();
+        let t = std::thread::Builder::new().name(format!("hidpp-read-{n}")).spawn(move || {
+            let stop = HANDLE(stop_raw as *mut _);
+            if let hid::ReaderEnd::Gone(why) = hid::read_reports(n, &handle, len, stop, &tx) {
+                let report = Report { endpoint: GONE, at: Instant::now(), data: why.into_bytes() };
+                let _ = tx.send(report);
+            }
+        })?;
+        self.readers.push(t);
+        Ok(())
     }
 
     /// A handle another thread can use to wake [`Channel::wait_event`].
@@ -332,9 +395,9 @@ impl Channel {
     }
 
     /// Block until something happens: a report that is not a reply to us, a
-    /// control code, or `timeout` passing (`Ok(None)`). An error means the
-    /// device went away; the channel is then useless.
-    pub fn wait_event(&mut self, timeout: Duration) -> Result<Option<Event>, HidppError> {
+    /// control code, or `timeout` passing (`Ok(None)`; `None` waits for
+    /// ever). An error means the device went away; the channel is then useless.
+    pub fn wait_event(&mut self, timeout: Option<Duration>) -> Result<Option<Event>, HidppError> {
         loop {
             if let Some(c) = self.controls.pop_front() {
                 return Ok(Some(Event::Control(c)));
@@ -345,7 +408,11 @@ impl Channel {
             if self.gone {
                 return Err(HidppError::Io(format!("{}: device gone", self.label)));
             }
-            match self.rx.recv_timeout(timeout) {
+            let got = match timeout {
+                Some(t) => self.rx.recv_timeout(t),
+                None => self.rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+            };
+            match got {
                 Ok(r) => self.accept(r),
                 Err(RecvTimeoutError::Timeout) => return Ok(None),
                 Err(RecvTimeoutError::Disconnected) => self.gone = true,
@@ -475,6 +542,17 @@ impl Channel {
         r
     }
 
+    /// HID++ 1.0 short register write (sub-id 0x80): three parameter bytes.
+    pub fn write_register(
+        &mut self,
+        dev: u8,
+        register: u8,
+        params: [u8; 3],
+    ) -> Result<(), HidppError> {
+        let report = [SHORT, dev, 0x80, register, params[0], params[1], params[2]];
+        self.transact(&report, Expect { dev, sub: 0x80, addr: register }).map(|_| ())
+    }
+
     /// Protocol version via ROOT ping: `(major, minor)`. HID++ 1.0 devices
     /// answer with error 0x01 (invalid sub-id), reported here as (1, 0).
     pub fn ping(&mut self, dev: u8) -> Result<(u8, u8), HidppError> {
@@ -521,13 +599,38 @@ impl Drop for Channel {
     }
 }
 
-/// The HID++ collections of one physical USB device (same vendor, product
-/// and interface), chosen by usage page, never by ids alone.
-pub fn hidpp_collections(all: &[HidInfo], pid: u16) -> Vec<&HidInfo> {
-    all.iter()
+/// The HID++ collections of every device with product id `pid`, one group
+/// per physical device: two receivers of the same model (a keyboard's and a
+/// mouse's) must never be merged into one channel. Collections of the same
+/// USB interface share their instance id up to its last `&`
+/// (`7&1a2b3c4d&0&0000` and `...&0001`). Chosen by usage page, never by ids
+/// alone.
+pub fn hidpp_groups(all: &[HidInfo], pid: u16) -> Vec<Vec<&HidInfo>> {
+    let mut groups: Vec<(String, Vec<&HidInfo>)> = Vec::new();
+    let hidpp = all
+        .iter()
         .filter(|i| i.pid == pid)
-        .filter(|i| crate::diag::caps::role(i).starts_with("HID++"))
-        .collect()
+        .filter(|i| crate::diag::caps::role(i).starts_with("HID++"));
+    for i in hidpp {
+        let key = instance_key(&i.path);
+        match groups.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, g)) => g.push(i),
+            None => groups.push((key, vec![i])),
+        }
+    }
+    groups.into_iter().map(|(_, g)| g).collect()
+}
+
+/// The part of a HID collection's path shared by every collection of the same
+/// USB interface.
+fn instance_key(path: &str) -> String {
+    let inst = path.split('#').nth(2).unwrap_or(path);
+    inst.rsplit_once('&').map(|(k, _)| k).unwrap_or(inst).to_ascii_lowercase()
+}
+
+/// The first device's HID++ collections, for tools that expect one.
+pub fn hidpp_collections(all: &[HidInfo], pid: u16) -> Vec<&HidInfo> {
+    hidpp_groups(all, pid).into_iter().next().unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -574,6 +677,15 @@ mod tests {
     fn a_reply_for_another_device_index_is_not_ours() {
         let r = [0x11, 0x02, 0x0C, 0x19, 0x0F, 0xA0, 0x01];
         assert_eq!(classify(&r, E), Match::Unrelated);
+    }
+
+    #[test]
+    fn collections_of_one_interface_group_together_and_two_receivers_do_not() {
+        let a1 = r"\\?\HID#VID_046D&PID_C547&MI_02&Col01#7&1a2b3c4d&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}";
+        let a2 = r"\\?\HID#VID_046D&PID_C547&MI_02&Col02#7&1a2b3c4d&0&0001#{4d1e55b2-f16f-11cf-88cb-001111000030}";
+        let b1 = r"\\?\HID#VID_046D&PID_C547&MI_02&Col01#7&5e6f7a8b&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}";
+        assert_eq!(instance_key(a1), instance_key(a2));
+        assert_ne!(instance_key(a1), instance_key(b1));
     }
 
     #[test]

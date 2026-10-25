@@ -1,14 +1,24 @@
-//! The tray app: one hidden window, one tray icon, one worker per device.
+//! The tray app: one hidden window, one tray icon, one worker per device
+//! connection.
 //!
 //! The main thread sits in `GetMessageW` and wakes only for something real:
 //! the tray icon being clicked, a device arriving or leaving, the PC
 //! resuming, or a worker reporting new battery state. No timers tick while
 //! nothing happens.
+//!
+//! Re-entrancy: several Win32 calls (the tray menu's modal loop, the shell,
+//! cross-process sends) dispatch other messages back into the window
+//! procedure while they run. The app state lives in a thread-local `RefCell`,
+//! so none of those calls may run while it is borrowed; the ones that pump
+//! are made outside the borrow, and [`with_app`] declines a nested borrow
+//! rather than panicking.
 
 pub mod devices;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
+use std::sync::Mutex;
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -20,10 +30,13 @@ use windows::Win32::Devices::DeviceAndDriverInstallation::{
 };
 use windows::Win32::Devices::HumanInterfaceDevice::HidD_GetHidGuid;
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HWND, LPARAM, LRESULT, POINT, WPARAM,
+    CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND, LPARAM, LRESULT, POINT,
+    WAIT_ABANDONED_0, WAIT_OBJECT_0, WPARAM,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Threading::CreateMutexW;
+use windows::Win32::System::Threading::{
+    CreateMutexW, OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+};
 use windows::Win32::UI::Shell::{
     NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIIF_INFO, NIIF_WARNING, NIM_ADD,
     NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NIN_SELECT, NOTIFYICON_VERSION_4, NOTIFYICONDATAW,
@@ -31,34 +44,42 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreateIconFromResourceEx, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
-    DestroyIcon, DestroyMenu, DestroyWindow, DispatchMessageW, FindWindowW, GetCursorPos,
-    GetMessageW, GetSystemMetrics, HICON, KillTimer, LR_DEFAULTCOLOR, MF_CHECKED, MF_GRAYED,
-    MF_SEPARATOR, MF_STRING, MSG, PBT_APMRESUMEAUTOMATIC, PostMessageW, PostQuitMessage,
-    RegisterClassW, RegisterWindowMessageW, SM_CXSMICON, SW_SHOWNORMAL, SetForegroundWindow,
-    SetTimer, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx, WINDOW_EX_STYLE,
-    WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_ENDSESSION, WM_NULL, WM_POWERBROADCAST,
-    WM_TIMER, WNDCLASSW, WS_OVERLAPPED,
+    DestroyIcon, DestroyMenu, DestroyWindow, DispatchMessageW, ENDSESSION_CLOSEAPP, FindWindowW,
+    GetMessageW, GetSystemMetrics, GetWindowThreadProcessId, HICON, KillTimer, LR_DEFAULTCOLOR,
+    MF_CHECKED, MF_GRAYED, MF_SEPARATOR, MF_STRING, MSG, PBT_APMRESUMEAUTOMATIC, PostMessageW,
+    PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SM_CXSMICON, SMTO_ABORTIFHUNG,
+    SW_SHOWNORMAL, SendMessageTimeoutW, SetForegroundWindow, SetTimer, TPM_NONOTIFY, TPM_RETURNCMD,
+    TPM_RIGHTBUTTON, TrackPopupMenuEx, WINDOW_EX_STYLE, WM_APP, WM_CLOSE, WM_CONTEXTMENU,
+    WM_DESTROY, WM_ENDSESSION, WM_NULL, WM_POWERBROADCAST, WM_TIMER, WNDCLASSW, WS_OVERLAPPED,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
 use crate::config::Config;
 use crate::hid;
-use crate::hidpp;
+use crate::hidpp::{self, HidppLock, LockState};
 use crate::platform;
-use devices::{Kind, Link, Reporter, Shared, Status, WM_APP_STATE, Worker};
+use devices::{Device, Link, Reporter, Shared, State, Status, WM_APP_STATE, Worker};
 
 const CLASS: PCWSTR = w!("BluGHub.Core");
 const WM_TRAY: u32 = WM_APP + 1;
 /// A HID device arrived or left (posted from the hotplug callback).
 const WM_APP_DEVCHANGE: u32 = WM_APP + 3;
-/// A second launch wants this one to show itself.
+/// A second launch wants this one to show itself. Answered with 1 by a live
+/// instance, so a launch during shutdown can tell the difference.
 const WM_APP_SHOW: u32 = WM_APP + 4;
+/// The HID++ lock another process held has been released to us.
+const WM_APP_LOCKED: u32 = WM_APP + 5;
 
 const TRAY_ID: u32 = 1;
 /// Hotplug sends a burst of arrivals (one per HID collection); act once, a
 /// moment after the last.
 const DEVCHANGE_TIMER: usize = 1;
 const DEVCHANGE_DELAY_MS: u32 = 400;
+/// Retrying a tray icon that the shell did not accept (Explorer still
+/// starting at sign-in).
+const TRAY_RETRY_TIMER: usize = 2;
+const TRAY_RETRY_MS: u32 = 3000;
+const TRAY_RETRIES: u8 = 20;
 
 const IDM_AUTOSTART: usize = 10;
 const IDM_LOGS: usize = 11;
@@ -68,56 +89,120 @@ const IDM_QUIT: usize = 13;
 struct App {
     hwnd: HWND,
     icon: HICON,
-    taskbar_created: u32,
     shared: Shared,
     config: Config,
     workers: Vec<Worker>,
+    tray_ok: bool,
+    tray_retries: u8,
     /// Devices already warned about, cleared once charged again.
     warned_low: [bool; 2],
     shut_down: bool,
-    _hidpp_lock: Option<hidpp::HidppLock>,
+    hidpp_lock: Option<HidppLock>,
+    /// Waits for a probe to release the HID++ lock; stopped on shutdown.
+    lock_waiter: Option<(hid::StopEvent, JoinHandle<()>)>,
 }
 
 thread_local! {
     static APP: RefCell<Option<App>> = const { RefCell::new(None) };
+    /// Kept outside `APP` so every unrelated message can be checked against
+    /// it without borrowing the app state.
+    static TASKBAR_CREATED: Cell<u32> = const { Cell::new(0) };
 }
 
+/// The lock handed over by the waiter thread, collected on WM_APP_LOCKED.
+static HANDED_LOCK: Mutex<Option<HidppLock>> = Mutex::new(None);
+
+/// Run `f` on the app state. If it is already borrowed further up the stack
+/// (a message dispatched from inside a call that pumps), skip rather than
+/// panic: a skipped redraw is harmless, an abort is not.
 fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
-    APP.with(|a| a.borrow_mut().as_mut().map(f))
+    APP.with(|a| match a.try_borrow_mut() {
+        Ok(mut a) => a.as_mut().map(f),
+        Err(_) => {
+            debug!("app state busy; message skipped");
+            None
+        }
+    })
 }
 
-/// Ask an already running instance to do something; true if one answered.
-fn signal_running(msg: u32) -> bool {
-    match unsafe { FindWindowW(CLASS, PCWSTR::null()) } {
-        Ok(h) if !h.is_invalid() => {
-            unsafe { PostMessageW(Some(h), msg, WPARAM(0), LPARAM(0)) }.is_ok()
+/// The running instance's window, if any.
+fn running_window() -> Option<HWND> {
+    unsafe { FindWindowW(CLASS, PCWSTR::null()) }.ok().filter(|h| !h.is_invalid())
+}
+
+/// `BluGHub --quit`: ask the running instance to quit and wait until it has.
+fn quit_running() {
+    let Some(h) = running_window() else {
+        info!("--quit: BluGHub is not running");
+        return;
+    };
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(h, Some(&mut pid)) };
+    let process = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) }.ok();
+    unsafe {
+        let _ = PostMessageW(Some(h), WM_CLOSE, WPARAM(0), LPARAM(0));
+    }
+    if let Some(p) = process {
+        // Stopping the workers takes at most a second or two.
+        unsafe {
+            WaitForSingleObject(p, 10_000);
+            let _ = CloseHandle(p);
         }
-        _ => false,
+    }
+}
+
+/// Become the one running instance. `None` means another instance is
+/// running and has been told to show itself.
+fn single_instance() -> Result<Option<HANDLE>> {
+    // Created owned by this (the main) thread: when the process ends, a
+    // second launch waiting on it gets it.
+    let mutex = unsafe { CreateMutexW(None, true, w!("Local\\BluGHub")) }
+        .context("creating the single-instance mutex")?;
+    if unsafe { GetLastError() } != ERROR_ALREADY_EXISTS {
+        return Ok(Some(mutex));
+    }
+    // Another instance. If it answers, it is alive: let it show itself.
+    if let Some(h) = running_window() {
+        let mut answer = 0usize;
+        let ok = unsafe {
+            SendMessageTimeoutW(
+                h,
+                WM_APP_SHOW,
+                WPARAM(0),
+                LPARAM(0),
+                SMTO_ABORTIFHUNG,
+                5000,
+                Some(&mut answer),
+            )
+        };
+        if ok.0 != 0 && answer == 1 {
+            unsafe {
+                let _ = CloseHandle(mutex);
+            }
+            return Ok(None);
+        }
+    }
+    // It is starting or shutting down: wait for it to finish, then take over.
+    let r = unsafe { WaitForSingleObject(mutex, 15_000) };
+    if r == WAIT_OBJECT_0 || r == WAIT_ABANDONED_0 {
+        Ok(Some(mutex))
+    } else {
+        unsafe {
+            let _ = CloseHandle(mutex);
+        }
+        Ok(None)
     }
 }
 
 pub fn run(args: &[String]) -> Result<()> {
     if args.iter().any(|a| a == "--quit") {
-        if !signal_running(WM_CLOSE) {
-            info!("--quit: BluGHub is not running");
-        }
+        quit_running();
         return Ok(());
     }
-
-    // One instance per user session. A second launch (Start Menu, double
-    // click) tells the first one to show itself and leaves.
-    let mutex = unsafe { CreateMutexW(None, false, w!("Local\\BluGHub")) }
-        .context("creating the single-instance mutex")?;
-    if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
-        signal_running(WM_APP_SHOW);
-        unsafe {
-            let _ = CloseHandle(mutex);
-        }
-        return Ok(());
-    }
+    let Some(mutex) = single_instance()? else { return Ok(()) };
 
     let config = match Config::load(&crate::app_paths::config_path()) {
-        Ok(c) => c,
+        Ok(c) => c.sanitized(),
         Err(e) => {
             warn!("{e:#}; running on defaults");
             Config::default()
@@ -125,21 +210,18 @@ pub fn run(args: &[String]) -> Result<()> {
     };
     info!("BluGHub {} starting", crate::version());
 
-    if !cfg!(debug_assertions)
-        && let Err(e) = platform::create_start_menu_shortcut()
-    {
-        warn!("Start Menu shortcut: {e:#}");
-    }
-
-    // Talking HID++ is exclusive to one blu-ghub process at a time (the
-    // diagnostics' probe takes the same lock).
-    let lock = match hidpp::acquire_lock() {
-        Ok(l) => Some(l),
-        Err(e) => {
-            warn!("{e:#}; devices will not be read");
-            None
+    if !cfg!(debug_assertions) {
+        if let Err(e) = platform::create_start_menu_shortcut() {
+            warn!("Start Menu shortcut: {e:#}");
         }
-    };
+        // Same reason as the shortcut: a Run entry still pointing at a moved
+        // exe fails silently at sign-in.
+        if platform::starts_with_windows()
+            && let Err(e) = platform::set_start_with_windows(true)
+        {
+            warn!("Start with Windows: {e:#}");
+        }
+    }
 
     let hwnd = create_window()?;
     let size = unsafe { GetSystemMetrics(SM_CXSMICON) }.max(16) as u32;
@@ -154,26 +236,57 @@ pub fn run(args: &[String]) -> Result<()> {
         )
     }
     .context("creating the tray icon")?;
-    let taskbar_created = unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) };
-    let has_lock = lock.is_some();
+    TASKBAR_CREATED.with(|t| t.set(unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) }));
+
+    // Talking HID++ is exclusive to one blu-ghub process at a time. If a
+    // probe holds it, wait for that in the background.
+    let (hidpp_lock, lock_waiter) = match hidpp::try_lock() {
+        Ok(LockState::Acquired(l)) => (Some(l), None),
+        Ok(LockState::Busy(busy)) => {
+            info!("another blu-ghub process is using the devices; waiting for it to finish");
+            let stop = hid::StopEvent::new()?;
+            let stop_raw = stop.raw().0 as isize;
+            let hwnd_raw = hwnd.0 as isize;
+            let t =
+                std::thread::Builder::new().name("hidpp-lock-wait".into()).spawn(move || {
+                    if let Some(lock) = busy.wait(HANDLE(stop_raw as *mut _)) {
+                        *HANDED_LOCK.lock().unwrap_or_else(|e| e.into_inner()) = Some(lock);
+                        unsafe {
+                            let _ = PostMessageW(
+                                Some(HWND(hwnd_raw as *mut _)),
+                                WM_APP_LOCKED,
+                                WPARAM(0),
+                                LPARAM(0),
+                            );
+                        }
+                    }
+                })?;
+            (None, Some((stop, t)))
+        }
+        Err(e) => {
+            warn!("{e:#}; devices will not be read");
+            (None, None)
+        }
+    };
+
     APP.with(|a| {
         *a.borrow_mut() = Some(App {
             hwnd,
             icon,
-            taskbar_created,
             shared: Shared::default(),
             config,
             workers: Vec::new(),
+            tray_ok: false,
+            tray_retries: 0,
             warned_low: [false; 2],
             shut_down: false,
-            _hidpp_lock: lock,
+            hidpp_lock,
+            lock_waiter,
         })
     });
     with_app(|a| a.tray_add());
     let hotplug = register_hotplug(hwnd);
-    if has_lock {
-        with_app(|a| a.reconcile_workers());
-    }
+    with_app(|a| a.reconcile_workers());
 
     let mut msg = MSG::default();
     while unsafe { GetMessageW(&mut msg, None, 0, 0) }.as_bool() {
@@ -185,6 +298,7 @@ pub fn run(args: &[String]) -> Result<()> {
             let _ = CM_Unregister_Notification(h);
         }
     }
+    APP.with(|a| a.borrow_mut().take());
     unsafe {
         let _ = CloseHandle(mutex);
     }
@@ -267,19 +381,31 @@ unsafe extern "system" fn on_hotplug(
     0
 }
 
+/// Sign-extended x and y from a packed `WPARAM`/`LPARAM` (GET_X_LPARAM).
+fn point_from(v: usize) -> POINT {
+    POINT { x: (v & 0xFFFF) as u16 as i16 as i32, y: ((v >> 16) & 0xFFFF) as u16 as i16 as i32 }
+}
+
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_TRAY => {
-            // NOTIFYICON_VERSION_4: the event is in LOWORD(lparam).
+            // NOTIFYICON_VERSION_4: the event is in LOWORD(lparam), the
+            // icon's anchor point in wparam.
             let event = (lparam.0 & 0xFFFF) as u32;
             if event == WM_CONTEXTMENU || event == NIN_SELECT || event == NIN_SELECT + 1 {
-                // The menu runs a modal loop that dispatches other messages
-                // (battery updates, hotplug) back into this procedure, so it
-                // must not run inside a borrow of the app state.
-                let snapshot = with_app(|a| (a.hwnd, a.shared.lock().unwrap().clone()));
-                if let Some((hwnd, status)) = snapshot {
-                    let cmd = show_menu(hwnd, &status);
-                    with_app(|a| a.on_command(cmd));
+                // The menu's modal loop dispatches other messages back into
+                // this procedure: run it on a snapshot, outside the borrow.
+                let snapshot = with_app(|a| {
+                    (!a.shut_down)
+                        .then(|| a.shared.lock().unwrap_or_else(|e| e.into_inner()).clone())
+                });
+                if let Some(Some(status)) = snapshot {
+                    let cmd = show_menu(hwnd, &status, point_from(wparam.0));
+                    if cmd == IDM_LOGS {
+                        open_logs_folder();
+                    } else {
+                        with_app(|a| a.on_command(cmd));
+                    }
                 }
             }
             LRESULT(0)
@@ -299,22 +425,51 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             with_app(|a| a.reconcile_workers());
             LRESULT(0)
         }
+        WM_TIMER if wparam.0 == TRAY_RETRY_TIMER => {
+            with_app(|a| a.tray_add());
+            LRESULT(0)
+        }
         WM_APP_SHOW => {
+            let alive = with_app(|a| {
+                if a.shut_down {
+                    return false;
+                }
+                a.balloon("BluGHub is already running", "It lives here in the tray.", false);
+                true
+            });
+            LRESULT(alive.unwrap_or(false) as isize)
+        }
+        WM_APP_LOCKED => {
+            let lock = HANDED_LOCK.lock().unwrap_or_else(|e| e.into_inner()).take();
             with_app(|a| {
-                a.balloon("BluGHub is already running", "It lives here in the tray.", false)
+                if let Some(l) = lock {
+                    info!("the devices are free again");
+                    a.hidpp_lock = Some(l);
+                    a.reconcile_workers();
+                }
             });
             LRESULT(0)
         }
         WM_POWERBROADCAST => {
             if wparam.0 as u32 == PBT_APMRESUMEAUTOMATIC {
                 debug!("resumed from sleep: refreshing devices");
-                with_app(|a| a.workers.iter().for_each(|w| w.refresh()));
+                with_app(|a| {
+                    a.reconcile_workers();
+                    a.workers.iter().for_each(|w| w.refresh());
+                });
             }
             LRESULT(1)
         }
         WM_ENDSESSION if wparam.0 != 0 => {
-            // Windows is shutting down: stop cleanly now, there is no later.
+            // The session is ending, or Restart Manager (an installer)
+            // wants this app gone: stop now and leave.
+            if lparam.0 as u32 & ENDSESSION_CLOSEAPP != 0 {
+                info!("asked to close by Restart Manager");
+            }
             with_app(|a| a.shutdown());
+            unsafe {
+                let _ = DestroyWindow(hwnd);
+            }
             LRESULT(0)
         }
         WM_CLOSE => {
@@ -329,13 +484,28 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         _ => {
-            if with_app(|a| a.taskbar_created == msg).unwrap_or(false) {
+            let taskbar = TASKBAR_CREATED.with(|t| t.get());
+            if taskbar != 0 && msg == taskbar {
                 // Explorer restarted: the tray is new and empty.
-                with_app(|a| a.tray_add());
+                with_app(|a| {
+                    a.tray_ok = false;
+                    a.tray_retries = 0;
+                    a.tray_add();
+                });
                 return LRESULT(0);
             }
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
+    }
+}
+
+fn open_logs_folder() {
+    let dir = HSTRING::from(crate::app_paths::logs_dir().as_os_str());
+    let r = unsafe {
+        ShellExecuteW(None, w!("open"), &dir, PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL)
+    };
+    if r.0 as isize <= 32 {
+        warn!("could not open the log folder (ShellExecute {})", r.0 as isize);
     }
 }
 
@@ -346,20 +516,16 @@ fn copy_wide(dst: &mut [u16], s: &str) {
 }
 
 /// One line per device, for the tooltip and the menu.
-fn describe(kind: Kind, status: &Status) -> String {
-    let s = status.get(kind);
-    match (&s.link, &s.battery) {
-        (Link::Absent, _) => format!("{}: not connected", kind.name()),
-        (Link::Connected, Some(b)) => format!("{}: {}", kind.name(), b.short()),
-        (Link::Connected, None) => format!("{}: connected", kind.name()),
-        (Link::Sleeping, Some(b)) => {
-            let what = if kind == Kind::Headset { "off" } else { "asleep" };
-            format!("{}: {what} (last {})", kind.name(), b.short())
-        }
-        (Link::Sleeping, None) => {
-            let what = if kind == Kind::Headset { "off" } else { "asleep" };
-            format!("{}: {what}", kind.name())
-        }
+fn describe(device: Device, status: &Status) -> String {
+    let s = status.device(device);
+    let name = device.name();
+    let off = if device == Device::Headset { "off" } else { "asleep" };
+    match (&s.state, &s.battery) {
+        (State::Absent, _) => format!("{name}: not connected"),
+        (State::Connected, Some(b)) => format!("{name}: {}", b.short()),
+        (State::Connected, None) => format!("{name}: connected"),
+        (State::Sleeping, Some(b)) => format!("{name}: {off} (last {})", b.short()),
+        (State::Sleeping, None) => format!("{name}: {off}"),
     }
 }
 
@@ -374,20 +540,47 @@ impl App {
     }
 
     fn tooltip(&self) -> String {
-        let s = self.shared.lock().unwrap().clone();
-        format!("BluGHub\n{}\n{}", describe(Kind::Keyboard, &s), describe(Kind::Headset, &s))
+        let s = self.shared.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        format!("BluGHub\n{}\n{}", describe(Device::Keyboard, &s), describe(Device::Headset, &s))
     }
 
+    /// Add the icon; if the shell does not take it (Explorer still starting
+    /// at sign-in), retry on a timer for a minute.
     fn tray_add(&mut self) {
+        if self.shut_down || self.tray_ok {
+            unsafe {
+                let _ = KillTimer(Some(self.hwnd), TRAY_RETRY_TIMER);
+            }
+            return;
+        }
         let mut nid = self.nid();
         nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
         nid.uCallbackMessage = WM_TRAY;
         nid.hIcon = self.icon;
         copy_wide(&mut nid.szTip, &self.tooltip());
         unsafe {
-            let _ = Shell_NotifyIconW(NIM_ADD, &nid);
+            // A timed-out add may have gone through anyway, in which case a
+            // second add fails but a modify works.
+            let added = Shell_NotifyIconW(NIM_ADD, &nid).as_bool()
+                || Shell_NotifyIconW(NIM_MODIFY, &nid).as_bool();
             nid.Anonymous.uVersion = NOTIFYICON_VERSION_4;
-            let _ = Shell_NotifyIconW(NIM_SETVERSION, &nid);
+            // Without version 4 the menu never opens: the callback would
+            // carry old-style mouse messages instead.
+            self.tray_ok = added && Shell_NotifyIconW(NIM_SETVERSION, &nid).as_bool();
+        }
+        if self.tray_ok {
+            unsafe {
+                let _ = KillTimer(Some(self.hwnd), TRAY_RETRY_TIMER);
+            }
+        } else if self.tray_retries < TRAY_RETRIES {
+            self.tray_retries += 1;
+            debug!("tray icon not accepted yet (attempt {})", self.tray_retries);
+            unsafe { SetTimer(Some(self.hwnd), TRAY_RETRY_TIMER, TRAY_RETRY_MS, None) };
+        } else {
+            warn!("the tray icon could not be added");
+            unsafe {
+                let _ = KillTimer(Some(self.hwnd), TRAY_RETRY_TIMER);
+            }
         }
     }
 
@@ -402,6 +595,9 @@ impl App {
 
     /// A notification from the tray icon (shown as a toast on Windows 10/11).
     fn balloon(&self, title: &str, text: &str, warning: bool) {
+        if self.shut_down {
+            return;
+        }
         let mut nid = self.nid();
         nid.uFlags = NIF_INFO;
         copy_wide(&mut nid.szInfoTitle, title);
@@ -413,15 +609,19 @@ impl App {
     }
 
     fn on_state(&mut self) {
+        if self.shut_down {
+            return;
+        }
         self.update_tooltip();
         let threshold = self.config.settings.low_battery_percent;
         if threshold == 0 {
             return;
         }
-        let s = self.shared.lock().unwrap().clone();
-        for (i, kind) in [Kind::Keyboard, Kind::Headset].into_iter().enumerate() {
-            let Some(b) = &s.get(kind).battery else { continue };
-            if s.get(kind).link != Link::Connected {
+        let s = self.shared.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        for (i, device) in [Device::Keyboard, Device::Headset].into_iter().enumerate() {
+            let d = s.device(device);
+            let Some(b) = &d.battery else { continue };
+            if d.state != State::Connected {
                 continue;
             }
             // Warn once on the way down; re-arm after charging or a clear
@@ -429,28 +629,26 @@ impl App {
             // the line does not warn again and again.
             if !self.warned_low[i] && !b.charging && b.percent <= threshold {
                 self.warned_low[i] = true;
-                let text = format!("{} battery is at {}%.", kind.name(), b.percent);
+                let text = format!("{} battery is at {}%.", device.name(), b.percent);
                 self.balloon("Battery low", &text, true);
                 info!("{text}");
-            } else if self.warned_low[i] && (b.charging || b.percent > threshold + 10) {
+            } else if self.warned_low[i] && (b.charging || b.percent > threshold.saturating_add(10))
+            {
                 self.warned_low[i] = false;
             }
         }
     }
 
-    /// Start workers for devices that are present and not yet served; drop
-    /// the ones whose device has gone.
+    /// Start workers for connections whose hardware is present and not yet
+    /// served; drop the ones whose hardware has gone.
     fn reconcile_workers(&mut self) {
-        if self._hidpp_lock.is_none() {
+        if self.shut_down || self.hidpp_lock.is_none() {
             return;
         }
-        let finished: Vec<Worker> = {
-            let (done, live): (Vec<Worker>, Vec<Worker>) =
-                std::mem::take(&mut self.workers).into_iter().partition(|w| w.is_finished());
-            self.workers = live;
-            done
-        };
-        for w in finished {
+        let (done, live): (Vec<Worker>, Vec<Worker>) =
+            std::mem::take(&mut self.workers).into_iter().partition(|w| w.is_finished());
+        self.workers = live;
+        for w in done {
             w.stop();
         }
         let all = match hid::logitech_collections() {
@@ -460,13 +658,13 @@ impl App {
                 return;
             }
         };
-        let poll = Duration::from_secs(self.config.settings.battery_check_minutes.max(5) * 60);
-        for kind in [Kind::Keyboard, Kind::Headset] {
-            if self.workers.iter().any(|w| w.kind == kind) {
+        let poll = Duration::from_secs(self.config.settings.battery_check_minutes * 60);
+        for link in Link::ALL {
+            if self.workers.iter().any(|w| w.link == link) {
                 continue;
             }
             let rep = Reporter { shared: self.shared.clone(), hwnd: self.hwnd.0 as isize };
-            if let Some(w) = devices::start(kind, &all, rep, poll) {
+            if let Some(w) = devices::start(link, &all, rep, poll) {
                 self.workers.push(w);
             }
         }
@@ -479,37 +677,40 @@ impl App {
         }
         self.shut_down = true;
         let started = Instant::now();
+        // The icon goes first, so it disappears even if a worker is slow.
+        let nid = self.nid();
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), TRAY_RETRY_TIMER);
+            let _ = KillTimer(Some(self.hwnd), DEVCHANGE_TIMER);
+            let _ = Shell_NotifyIconW(NIM_DELETE, &nid);
+        }
         for w in std::mem::take(&mut self.workers) {
             w.stop();
         }
-        debug!("workers stopped in {:?}", started.elapsed());
-        let nid = self.nid();
+        if let Some((stop, t)) = self.lock_waiter.take() {
+            stop.set();
+            let _ = t.join();
+        }
+        self.hidpp_lock = None;
         unsafe {
-            let _ = Shell_NotifyIconW(NIM_DELETE, &nid);
             let _ = DestroyIcon(self.icon);
         }
+        debug!("shut down in {:?}", started.elapsed());
     }
 
     fn on_command(&mut self, cmd: usize) {
         match cmd {
-            IDM_REFRESH => self.workers.iter().for_each(|w| w.refresh()),
+            IDM_REFRESH => {
+                // Also picks up a device whose worker could not start.
+                self.reconcile_workers();
+                self.workers.iter().for_each(|w| w.refresh());
+            }
             IDM_AUTOSTART => {
                 let on = !platform::starts_with_windows();
                 if let Err(e) = platform::set_start_with_windows(on) {
                     warn!("Start with Windows: {e:#}");
                 }
             }
-            IDM_LOGS => unsafe {
-                let dir = HSTRING::from(crate::app_paths::logs_dir().as_os_str());
-                ShellExecuteW(
-                    None,
-                    w!("open"),
-                    &dir,
-                    PCWSTR::null(),
-                    PCWSTR::null(),
-                    SW_SHOWNORMAL,
-                );
-            },
             IDM_QUIT => unsafe {
                 let _ = PostMessageW(Some(self.hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
             },
@@ -518,13 +719,13 @@ impl App {
     }
 }
 
-/// Show the tray menu and return the chosen command (0 for none). Runs
-/// without any borrow of the app state; see the call site.
-fn show_menu(hwnd: HWND, status: &Status) -> usize {
+/// Show the tray menu at `at` and return the chosen command (0 for none).
+/// Runs without any borrow of the app state; see the call site.
+fn show_menu(hwnd: HWND, status: &Status, at: POINT) -> usize {
     let Ok(menu) = (unsafe { CreatePopupMenu() }) else { return 0 };
     unsafe {
-        for (i, kind) in [Kind::Keyboard, Kind::Headset].into_iter().enumerate() {
-            let line = HSTRING::from(describe(kind, status));
+        for (i, device) in [Device::Keyboard, Device::Headset].into_iter().enumerate() {
+            let line = HSTRING::from(describe(device, status));
             let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 100 + i, &line);
         }
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
@@ -535,15 +736,13 @@ fn show_menu(hwnd: HWND, status: &Status) -> usize {
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         let _ = AppendMenuW(menu, MF_STRING, IDM_QUIT, w!("Quit"));
 
-        let mut pt = POINT::default();
-        let _ = GetCursorPos(&mut pt);
         // Without this the menu does not close when you click elsewhere.
         let _ = SetForegroundWindow(hwnd);
         let cmd = TrackPopupMenuEx(
             menu,
             (TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY).0,
-            pt.x,
-            pt.y,
+            at.x,
+            at.y,
             hwnd,
             None,
         )
@@ -551,5 +750,27 @@ fn show_menu(hwnd: HWND, status: &Status) -> usize {
         let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
         let _ = DestroyMenu(menu);
         cmd
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn anchor_points_keep_their_sign_on_monitors_left_of_the_primary() {
+        // x = -100, y = 300
+        let packed = ((300u32 << 16) | (-100i16 as u16 as u32)) as usize;
+        let p = point_from(packed);
+        assert_eq!((p.x, p.y), (-100, 300));
+    }
+
+    #[test]
+    fn a_sleeping_keyboard_shows_its_last_reading() {
+        let mut s = Status::default();
+        s.keyboard_receiver.state = State::Sleeping;
+        s.keyboard_receiver.battery = crate::battery::from_g915(&[0x0F, 0xEE, 0x00]);
+        assert_eq!(describe(Device::Keyboard, &s), "G915: asleep (last 91%)");
+        assert_eq!(describe(Device::Headset, &s), "G935: not connected");
     }
 }
