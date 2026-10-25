@@ -40,7 +40,14 @@ timeout functions (v2+) are not available.
 
 Persistency capability reads 00 on both zones. setZoneEffect is fn3
 `[zone, effect index, params × 10, persist]`; send the strips (zone 1) before
-the logo. Current effect: fnE `[zone]` (probe: both off).
+the logo. Current effect: fnE `[zone]` (probe: both off). Zone info is fn1
+`[zone]` → `[zone, location(2), effect count, persistency]`, effect info fn2
+`[zone, index]` → `[zone, index, effect id(2), ...]`.
+
+Parameters (Solaar's layout; HeadsetControl sends the same for this
+headset): static `[r g b ramp]`; breathing `[r g b period(2, ms) form
+intensity]`; cycle `[0 0 0 0 0 period(2, ms) intensity]`. blu-ghub sends
+persist 0 and writes a configured zone at every power-on.
 
 ## Buttons: 0x8010
 

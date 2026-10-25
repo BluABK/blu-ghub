@@ -24,6 +24,7 @@ pub struct Config {
 #[serde(default)]
 pub struct Headset {
     pub buttons: HeadsetButtons,
+    pub lighting: crate::lighting::HeadsetLighting,
 }
 
 /// What the G935's G1-G3 do while blu-ghub runs. By default nothing is
@@ -81,6 +82,9 @@ impl Config {
             clamp("low_battery_percent", s.low_battery_percent as u64, 0, 100) as u8;
         s.battery_check_minutes = clamp("battery_check_minutes", s.battery_check_minutes, 5, 1440);
         s.log_retention_days = clamp("log_retention_days", s.log_retention_days, 1, 3650);
+        let l = &mut self.headset.lighting;
+        l.sides = l.sides.map(|z| z.sanitized());
+        l.logo = l.logo.map(|z| z.sanitized());
         self
     }
 

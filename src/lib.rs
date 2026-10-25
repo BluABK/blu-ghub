@@ -28,6 +28,7 @@ pub mod hidpp;
 pub mod icon_art;
 pub mod input;
 pub mod keynames;
+pub mod lighting;
 pub mod onboard;
 pub mod platform;
 

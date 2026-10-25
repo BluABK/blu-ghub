@@ -36,8 +36,8 @@ Quit
 ```
 
 **Settings…** opens a window with each device's state, battery, voltage and
-the time of the reading, and the settings below: the G935's buttons, the
-low-battery warning, how often batteries are read, how long logs are kept,
+the time of the reading, and the settings below: the G935's buttons and
+lighting, the low-battery warning, how often batteries are read, how long logs are kept,
 and Start with Windows. Save applies them at once (a changed button hands
 the headset's buttons back and takes them again). Saving rewrites the
 config file, so comments written in it by hand do not survive; the version
@@ -118,7 +118,21 @@ log_retention_days = 14
 g1 = "previous_track"
 g2 = "next_track"
 g3 = "off"
+
+[headset.lighting.sides]     # the strips round the ear cups
+effect = "breathing"         # off, static, breathing, cycle
+color = "#3c8f5a"            # static and breathing
+period_ms = 6000             # breathing and cycle, 1-65535
+brightness = 60              # 1-100 (steady: the colour is dimmed)
+
+[headset.lighting.logo]
+effect = "off"
 ```
+
+**Headset lighting.** A zone with no `[headset.lighting.*]` section is never
+written and shows whatever the headset does by itself. A configured one is
+set each time the headset switches on, since the headset cannot store
+lighting; the settings window edits both.
 
 Button actions: `default` (leave it to the headset), `off`, `play_pause`,
 `stop`, `next_track`, `previous_track`, `mute` (the PC's sound output),

@@ -812,8 +812,8 @@ impl App {
                 continue;
             }
             let rep = Reporter { shared: self.shared.clone(), hwnd: self.hwnd.0 as isize };
-            let buttons = self.config.headset.buttons.as_array();
-            if let Some(w) = devices::start(link, &all, rep, poll, buttons) {
+            let headset = self.config.headset.clone();
+            if let Some(w) = devices::start(link, &all, rep, poll, headset) {
                 self.workers.push(w);
             }
         }
@@ -865,7 +865,7 @@ impl App {
         self.config_error = None;
         let old = std::mem::replace(&mut self.config, new);
         let poll = old.settings.battery_check_minutes != self.config.settings.battery_check_minutes;
-        let buttons = old.headset.buttons != self.config.headset.buttons;
+        let buttons = old.headset != self.config.headset;
         info!("settings saved{}", if poll || buttons { "; restarting workers" } else { "" });
         let (stop, keep): (Vec<Worker>, Vec<Worker>) = std::mem::take(&mut self.workers)
             .into_iter()

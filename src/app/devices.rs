@@ -27,6 +27,7 @@ use crate::battery::{self, Battery, HeadsetPower};
 use crate::hid::HidInfo;
 use crate::hidpp::{self, Channel, Event, HidppError, RECEIVER, Waker, feature};
 use crate::input::ButtonAction;
+use crate::lighting::HeadsetLighting;
 
 pub const WM_APP_STATE: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 2;
 
@@ -240,7 +241,7 @@ pub fn start(
     all: &[HidInfo],
     rep: Reporter,
     poll: Duration,
-    buttons: [ButtonAction; 3],
+    headset_config: crate::config::Headset,
 ) -> Option<Worker> {
     let (pid, label) = match link {
         Link::KeyboardReceiver => (0xC547, "G915 receiver"),
@@ -287,7 +288,14 @@ pub fn start(
             info!("{}: worker started (device index {dev:#04x})", link.label());
             match link {
                 Link::KeyboardReceiver | Link::KeyboardCable => keyboard(ch, link, dev, &rep, poll),
-                Link::Headset => headset(ch, &rep, poll, buttons, mic.unwrap_or_default()),
+                Link::Headset => headset(
+                    ch,
+                    &rep,
+                    poll,
+                    headset_config.buttons.as_array(),
+                    headset_config.lighting,
+                    mic.unwrap_or_default(),
+                ),
             }
             rep.update(link, |s| s.state = State::Absent);
             info!("{}: worker stopped", link.label());
@@ -857,11 +865,35 @@ impl Buttons {
     }
 }
 
+/// The headset's configured lighting, written at every power-on: it
+/// cannot store an effect.
+struct Lights {
+    config: HeadsetLighting,
+    feat: Option<u8>,
+    /// Written since the headset last switched on (or one failed): not
+    /// retried until the next power-on, refresh or resume.
+    applied: bool,
+}
+
+impl Lights {
+    fn settle(&mut self, ch: &mut Channel, dev: u8) {
+        if self.applied || !self.config.is_set() {
+            return;
+        }
+        self.applied = true;
+        match crate::lighting::apply(ch, dev, &self.config, &mut self.feat) {
+            Ok(()) => debug!("G935: lighting set"),
+            Err(e) => warn!("G935: could not set the lighting: {e:#}"),
+        }
+    }
+}
+
 fn headset(
     mut ch: Channel,
     rep: &Reporter,
     poll: Duration,
     actions: [ButtonAction; 3],
+    lighting: HeadsetLighting,
     setup: MicSetup,
 ) {
     let link = Link::Headset;
@@ -876,6 +908,7 @@ fn headset(
         None => false,
     };
     let mut buttons = Buttons::new(actions, listening, setup.container);
+    let mut lights = Lights { config: lighting, feat: None, applied: false };
     if buttons.wanted() {
         for (n, a) in actions.iter().enumerate() {
             if *a == ButtonAction::Default {
@@ -946,9 +979,13 @@ fn headset(
             }
         }
         if on {
+            // Lighting first: the headset shows its own effect until then,
+            // and the button takeover takes most of a second.
+            lights.settle(&mut ch, dev);
             buttons.settle(&mut ch, dev);
         } else {
             buttons.forget();
+            lights.applied = false;
         }
 
         let mut timeout = wait_for(on, due, poll);
@@ -975,6 +1012,7 @@ fn headset(
             }
             Ok(Some(Event::Control(_))) => {
                 buttons.invalidate();
+                lights.applied = false;
                 need_read = true;
             }
             Ok(Some(Event::Report(r))) => match route(&r.data, dev, buttons.feat, adc_idx) {
@@ -1026,6 +1064,7 @@ fn headset(
                     // On while on: a power-on that never showed as off.
                     if on && matches!(power, HeadsetPower::On(_)) {
                         buttons.invalidate();
+                        lights.applied = false;
                     }
                     apply(power, &mut on, &mut due);
                 }

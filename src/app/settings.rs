@@ -29,6 +29,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use super::devices::{Device, Shared, State, Status};
 use crate::config::Config;
 use crate::input::ButtonAction;
+use crate::lighting::{Effect, Rgb, ZoneLight};
 use crate::platform;
 
 /// What the window starts from, and where it reports a save.
@@ -160,7 +161,7 @@ pub fn run(editing: Editing, auto_close: Option<Duration>) -> Result<bool> {
         wgpu_options: wgpu_options(),
         viewport: egui::ViewportBuilder::default()
             .with_title("BluGHub")
-            .with_inner_size([480.0, 470.0])
+            .with_inner_size([520.0, 600.0])
             .with_min_inner_size([400.0, 300.0])
             // An empty icon turns eframe's icon handling off; see above.
             .with_icon(egui::IconData::default())
@@ -222,6 +223,8 @@ struct Settings {
     autostart: bool,
     /// The outcome of the last save or change, shown under the buttons.
     note: Option<(String, bool)>,
+    /// The lighting zones' colours as typed (sides, logo).
+    hex: [String; 2],
     opened: Instant,
     auto_close: Option<Duration>,
     /// Passes of `logic` and painted frames, logged on close: an idle window
@@ -243,6 +246,7 @@ impl Settings {
             locked: editing.config_error,
             autostart: platform::starts_with_windows(),
             note: None,
+            hex: Default::default(),
             opened: Instant::now(),
             auto_close,
             passes: 0,
@@ -312,6 +316,8 @@ impl eframe::App for Settings {
                 ui.add_space(12.0);
                 self.headset_buttons(ui);
                 ui.add_space(12.0);
+                self.headset_lighting(ui);
+                ui.add_space(12.0);
                 self.general(ui);
                 ui.add_space(12.0);
                 self.save_row(ui);
@@ -355,6 +361,29 @@ impl Settings {
         };
         ui.add_space(2.0);
         ui.label(egui::RichText::new(hint).weak());
+    }
+
+    fn headset_lighting(&mut self, ui: &mut egui::Ui) {
+        ui.heading("G935 lighting");
+        ui.add_space(4.0);
+        let l = &mut self.draft.headset.lighting;
+        let [hex_sides, hex_logo] = &mut self.hex;
+        egui::Grid::new("lighting").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
+            for (name, zone, hex) in
+                [("Sides", &mut l.sides, hex_sides), ("Logo", &mut l.logo, hex_logo)]
+            {
+                ui.strong(name);
+                ui.vertical(|ui| zone_editor(ui, name, zone, hex));
+                ui.end_row();
+            }
+        });
+        ui.add_space(2.0);
+        ui.label(
+            egui::RichText::new(
+                "Set each time the headset switches on: it cannot store lighting itself.",
+            )
+            .weak(),
+        );
     }
 
     fn general(&mut self, ui: &mut egui::Ui) {
@@ -435,6 +464,75 @@ impl Settings {
             }
             Err(e) => self.note = Some((format!("Not saved: {e:#}"), true)),
         }
+    }
+}
+
+/// One zone: left to the headset, or an effect with its colour, speed
+/// and brightness.
+fn zone_editor(ui: &mut egui::Ui, id: &str, zone: &mut Option<ZoneLight>, hex: &mut String) {
+    let text = zone.map_or("Left to the headset", |z| z.effect.label());
+    egui::ComboBox::from_id_salt(id).selected_text(text).width(150.0).show_ui(ui, |ui| {
+        if ui.selectable_label(zone.is_none(), "Left to the headset").clicked() {
+            *zone = None;
+        }
+        for e in Effect::ALL {
+            let chosen = zone.is_some_and(|z| z.effect == e);
+            if ui.selectable_label(chosen, e.label()).clicked() {
+                *zone = Some(ZoneLight { effect: e, ..zone.unwrap_or_default() });
+            }
+        }
+    });
+    let Some(z) = zone else { return };
+    if z.effect.has_color() {
+        ui.horizontal(|ui| {
+            ui.label("Colour");
+            egui::widgets::color_picker::color_edit_button_srgb(ui, &mut z.color.0);
+            let typed = ui.add(
+                egui::TextEdit::singleline(hex)
+                    .desired_width(70.0)
+                    .font(egui::TextStyle::Monospace)
+                    .hint_text("#rrggbb"),
+            );
+            if typed.changed()
+                && let Ok(c) = hex.parse::<Rgb>()
+            {
+                z.color = c;
+            }
+            // Follows the picker, except while being typed in.
+            if !typed.has_focus() {
+                *hex = z.color.to_string();
+            }
+        });
+    }
+    if z.effect.has_period() {
+        ui.horizontal(|ui| {
+            ui.label("Speed");
+            let mut seconds = z.period_ms as f64 / 1000.0;
+            let range = *ZoneLight::PERIOD_MS.start() as f64 / 1000.0
+                ..=*ZoneLight::PERIOD_MS.end() as f64 / 1000.0;
+            if ui
+                .add(
+                    egui::DragValue::new(&mut seconds)
+                        .range(range)
+                        .speed(0.05)
+                        .max_decimals(3)
+                        .suffix(" s"),
+                )
+                .on_hover_text(
+                    "One breath, or one round of the colours: 0.001 to 65.535 s, the most the \
+                     headset's setting can hold. Drag, or double-click to type.",
+                )
+                .changed()
+            {
+                z.period_ms = (seconds * 1000.0).round().clamp(1.0, u16::MAX as f64) as u16;
+            }
+        });
+    }
+    if z.effect != Effect::Off {
+        ui.horizontal(|ui| {
+            ui.label("Brightness");
+            ui.add(egui::Slider::new(&mut z.brightness, 1..=100).suffix(" %"));
+        });
     }
 }
 
