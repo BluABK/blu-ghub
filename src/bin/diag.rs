@@ -2,7 +2,7 @@
 //!
 //!   BluGHub-diag caps                 list Logitech HID collections and report sizes
 //!   BluGHub-diag keys  [--minutes N]  key-timing logger (lost/late key-ups, chatter)
-//!   BluGHub-diag sniff [--minutes N]  passive capture of HID++ traffic
+//!   BluGHub-diag sniff [--minutes N] [--headset-all]  passive capture of HID++ traffic
 //!   BluGHub-diag probe                what the devices are and support (read requests)
 //!   BluGHub-diag dump-onboard         back up the keyboard's on-board memory (reads)
 //!
@@ -12,7 +12,7 @@
 use anyhow::{Result, bail};
 
 fn usage() -> &'static str {
-    "usage:\n  BluGHub-diag caps\n  BluGHub-diag keys  [--minutes N] [--echo]\n  BluGHub-diag sniff [--minutes N]\n  \
+    "usage:\n  BluGHub-diag caps\n  BluGHub-diag keys  [--minutes N] [--echo]\n  BluGHub-diag sniff [--minutes N] [--headset-all]\n  \
      BluGHub-diag probe\n  BluGHub-diag dump-onboard\n\n\
      Writing the keyboard's on-board memory (each saves a backup first and\n\
      verifies the result):\n  \
@@ -35,6 +35,7 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut minutes = None;
     let mut echo = false;
+    let mut headset_all = false;
     let mut rest = Vec::new();
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -45,6 +46,7 @@ fn main() -> Result<()> {
                     Some(v.parse::<u64>().map_err(|_| anyhow::anyhow!("bad --minutes: {v}"))?);
             }
             "--echo" => echo = true,
+            "--headset-all" => headset_all = true,
             "-h" | "--help" => {
                 println!("{}", usage());
                 return Ok(());
@@ -64,7 +66,7 @@ fn main() -> Result<()> {
             blu_ghub::diag::onboard::restore(parse_sector(sector)?, std::path::Path::new(file))
         }
         ["keys"] => blu_ghub::diag::keys::run(minutes, echo),
-        ["sniff"] => blu_ghub::diag::sniff::run(minutes),
+        ["sniff"] => blu_ghub::diag::sniff::run(minutes, headset_all),
         _ => bail!("{}", usage()),
     }
 }

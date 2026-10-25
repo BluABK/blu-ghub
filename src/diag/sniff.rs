@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, bail};
 
 use super::{STOP, Tee, TeeThread, hex, install_stop_handler, now_stamp, stamp};
-use crate::hid::{self, HidInfo, ReaderEnd, StopEvent};
+use crate::hid::{self, Descriptor, HidInfo, ReaderEnd, StopEvent};
 
 /// A HID++ report, decoded as far as is possible without knowing the
 /// device's feature table (which maps feature *indices* to feature ids).
@@ -155,15 +155,46 @@ impl std::fmt::Display for Decoded {
     }
 }
 
+fn is_hidpp(i: &HidInfo) -> bool {
+    super::caps::role(i).starts_with("HID++")
+}
+
 /// Which collections to listen on: the HID++ channels of the LIGHTSPEED
 /// receiver (and of the G915 itself when it is on its cable), and the
-/// headset's HID++ collection. Never the headset's other vendor collection.
-fn hidpp_endpoints(all: &[HidInfo]) -> Vec<HidInfo> {
+/// headset's HID++ collection. With `headset_all`, every other collection
+/// of the headset's dongle too (volume, telephony, the vendor channel): what
+/// its mute button and microphone boom send, if anything. Still only read.
+fn endpoints(all: &[HidInfo], headset_all: bool) -> Vec<HidInfo> {
     all.iter()
-        .filter(|i| super::caps::role(i).starts_with("HID++"))
+        .filter(|i| is_hidpp(i) || (headset_all && i.pid == HEADSET_PID))
         .filter(|i| i.input_len > 0)
         .cloned()
         .collect()
+}
+
+/// The G935's dongle.
+const HEADSET_PID: u16 = 0x0A87;
+
+/// The text for one report and its counting key: decoded on a HID++
+/// collection; elsewhere named from the collection's own descriptor (which
+/// buttons are down, which values it carries).
+fn describe(ep: &HidInfo, desc: Option<&Descriptor>, data: &[u8]) -> (String, String) {
+    if is_hidpp(ep) {
+        let d = decode(data);
+        return (d.to_string(), class(&d));
+    }
+    let class =
+        format!("{}, report {:02X}", super::caps::role(ep), data.first().copied().unwrap_or(0));
+    let Some(desc) = desc else { return (class.clone(), class) };
+    let mut parts: Vec<String> =
+        desc.pressed(data).into_iter().map(|(p, u)| super::caps::usage_text(p, u)).collect();
+    parts.extend(
+        desc.values(data)
+            .into_iter()
+            .map(|(p, u, v)| format!("{}={v}", super::caps::usage_text(p, u))),
+    );
+    let what = if parts.is_empty() { "nothing down".into() } else { parts.join(", ") };
+    (format!("{class}: {what}"), class)
 }
 
 /// The counting key for the summary: who sent what kind of message.
@@ -190,7 +221,7 @@ fn class(d: &Decoded) -> String {
     }
 }
 
-pub fn run(minutes: Option<u64>) -> Result<()> {
+pub fn run(minutes: Option<u64>, headset_all: bool) -> Result<()> {
     let mut tee = Tee::create("sniff");
     tee.line(&format!("BluGHub-diag sniff {} at {}", crate::version(), now_stamp()));
     tee.line("Read-only: nothing is sent to any device. Ctrl+C stops and prints a summary.");
@@ -199,9 +230,21 @@ pub fn run(minutes: Option<u64>) -> Result<()> {
     // text selection open only delays what is shown, never the capture.
     let mut out = TeeThread::spawn(tee);
 
-    let endpoints = hidpp_endpoints(&hid::logitech_collections()?);
+    let endpoints = endpoints(&hid::logitech_collections()?, headset_all);
     if endpoints.is_empty() {
         bail!("no HID++ collections found (is the receiver or headset plugged in?)");
+    }
+
+    let descriptors: Vec<Option<Descriptor>> = endpoints
+        .iter()
+        .map(|e| if is_hidpp(e) { None } else { Descriptor::read(&e.path).ok() })
+        .collect();
+    for (n, ep) in endpoints.iter().enumerate() {
+        if let Some(d) = &descriptors[n] {
+            for item in d.inputs() {
+                out.line(format!("  [{n}] {} {}", ep.short(), super::caps::item_text(&item)));
+            }
+        }
     }
 
     let stop = StopEvent::new()?;
@@ -237,7 +280,7 @@ pub fn run(minutes: Option<u64>) -> Result<()> {
     }
     drop(tx);
     if readers.is_empty() {
-        bail!("could not open any HID++ collection");
+        bail!("could not open any collection");
     }
 
     let started = Instant::now();
@@ -258,9 +301,10 @@ pub fn run(minutes: Option<u64>) -> Result<()> {
                 // squeeze a gap between two events into nothing.
                 let lag = chrono::Duration::from_std(r.at.elapsed()).unwrap_or_default();
                 let when = stamp(chrono::Local::now() - lag);
-                let d = decode(&r.data);
-                out.line(format!("{when} [{}] {:<44} {}", r.endpoint, d.to_string(), hex(&r.data)));
-                *counts.entry((r.endpoint, class(&d))).or_default() += 1;
+                let ep = r.endpoint;
+                let (what, class) = describe(&endpoints[ep], descriptors[ep].as_ref(), &r.data);
+                out.line(format!("{when} [{}] {what:<44} {}", r.endpoint, hex(&r.data)));
+                *counts.entry((r.endpoint, class)).or_default() += 1;
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => {

@@ -29,6 +29,54 @@ pub fn role(i: &hid::HidInfo) -> &'static str {
     }
 }
 
+/// Names for the usages the devices' plain (non-HID++) collections use.
+pub fn usage_name(page: u16, usage: u16) -> &'static str {
+    match (page, usage) {
+        (0x08, 0x09) => "LED Mute",
+        (0x08, 0x17) => "LED Off-Hook",
+        (0x08, 0x18) => "LED Ring",
+        (0x09, _) => "Button",
+        (0x0B, 0x01) => "Phone",
+        (0x0B, 0x05) => "Headset",
+        (0x0B, 0x07) => "Programmable Button",
+        (0x0B, 0x20) => "Hook Switch",
+        (0x0B, 0x21) => "Flash",
+        (0x0B, 0x24) => "Redial",
+        (0x0B, 0x2A) => "Line",
+        (0x0B, 0x2B) => "Speaker Phone",
+        (0x0B, 0x2F) => "Phone Mute",
+        (0x0C, 0xB5) => "Scan Next Track",
+        (0x0C, 0xB6) => "Scan Previous Track",
+        (0x0C, 0xB7) => "Stop",
+        (0x0C, 0xCD) => "Play/Pause",
+        (0x0C, 0xE2) => "Mute",
+        (0x0C, 0xE9) => "Volume Increment",
+        (0x0C, 0xEA) => "Volume Decrement",
+        (0xFF00..=0xFFFF, _) => "vendor",
+        _ => "",
+    }
+}
+
+/// `0B:002F Phone Mute`, or just the numbers for a usage without a name.
+pub fn usage_text(page: u16, usage: u16) -> String {
+    match usage_name(page, usage) {
+        "" => format!("{page:02X}:{usage:04X}"),
+        name => format!("{page:02X}:{usage:04X} {name}"),
+    }
+}
+
+/// One descriptor item, e.g. `in 08: 0B:002F Phone Mute (button, relative)`.
+pub fn item_text(i: &hid::InputItem) -> String {
+    let usage = if i.usage == i.usage_max {
+        usage_text(i.page, i.usage)
+    } else {
+        format!("{}..{:04X}", usage_text(i.page, i.usage), i.usage_max)
+    };
+    let kind = if i.button { "button" } else { "value" };
+    let relative = if i.relative { ", relative" } else { "" };
+    format!("in {:02X}: {usage} ({kind}{relative})", i.report_id)
+}
+
 pub fn run() -> Result<()> {
     let mut out = Tee::create("caps");
     out.line(&format!("BluGHub-diag caps {} at {}", crate::version(), super::now_stamp()));
@@ -53,6 +101,11 @@ pub fn run() -> Result<()> {
             role(i),
         ));
         out.file_only(&format!("    {}", i.path));
+        if let Ok(d) = hid::Descriptor::read(&i.path) {
+            for item in d.inputs() {
+                out.line(&format!("      {}", item_text(&item)));
+            }
+        }
     }
     out.line(&format!("\nWritten to {}", out.path.display()));
     out.flush();

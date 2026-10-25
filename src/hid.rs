@@ -18,9 +18,11 @@ use windows::Win32::Devices::DeviceAndDriverInstallation::{
     CM_Get_Device_Interface_ListW, CR_BUFFER_SMALL, CR_SUCCESS,
 };
 use windows::Win32::Devices::HumanInterfaceDevice::{
-    HIDD_ATTRIBUTES, HIDP_CAPS, HIDP_STATUS_SUCCESS, HidD_FreePreparsedData, HidD_GetAttributes,
-    HidD_GetHidGuid, HidD_GetPreparsedData, HidD_GetProductString, HidD_SetNumInputBuffers,
-    HidP_GetCaps, PHIDP_PREPARSED_DATA,
+    HIDD_ATTRIBUTES, HIDP_BUTTON_CAPS, HIDP_CAPS, HIDP_STATUS_SUCCESS, HIDP_VALUE_CAPS,
+    HidD_FreePreparsedData, HidD_GetAttributes, HidD_GetHidGuid, HidD_GetPreparsedData,
+    HidD_GetProductString, HidD_SetNumInputBuffers, HidP_GetButtonCaps, HidP_GetCaps,
+    HidP_GetUsageValue, HidP_GetUsagesEx, HidP_GetValueCaps, HidP_Input, PHIDP_PREPARSED_DATA,
+    USAGE_AND_PAGE,
 };
 use windows::Win32::Foundation::{
     CloseHandle, ERROR_IO_PENDING, GENERIC_READ, GENERIC_WRITE, HANDLE, WAIT_OBJECT_0,
@@ -284,6 +286,137 @@ pub fn logitech_collections() -> Result<Vec<HidInfo>> {
         .collect();
     out.sort_by_key(|i| (i.pid, i.interface, i.collection));
     Ok(out)
+}
+
+/// One input item of a collection's report descriptor: a button (or an
+/// array of them) or a value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputItem {
+    pub report_id: u8,
+    pub page: u16,
+    /// The usage, or the first of a range.
+    pub usage: u16,
+    /// The last usage of a range; `usage` itself for a single one.
+    pub usage_max: u16,
+    pub button: bool,
+    /// Reported as a one-off event rather than as a state that is held.
+    pub relative: bool,
+}
+
+/// A collection's parsed report descriptor, for naming what its input
+/// reports carry. Reading it needs no access to the device.
+pub struct Descriptor(PHIDP_PREPARSED_DATA);
+
+impl Descriptor {
+    pub fn read(path: &str) -> Result<Self> {
+        let h = open_query(path)?;
+        let mut pp = PHIDP_PREPARSED_DATA::default();
+        if !unsafe { HidD_GetPreparsedData(h.0, &mut pp) } {
+            bail!("HidD_GetPreparsedData failed for {path}");
+        }
+        Ok(Self(pp))
+    }
+
+    /// Every input item, ordered by report id and usage.
+    pub fn inputs(&self) -> Vec<InputItem> {
+        let mut caps = HIDP_CAPS::default();
+        if unsafe { HidP_GetCaps(self.0, &mut caps) } != HIDP_STATUS_SUCCESS {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        let mut buttons: Vec<HIDP_BUTTON_CAPS> =
+            (0..caps.NumberInputButtonCaps).map(|_| Default::default()).collect();
+        let mut n = buttons.len() as u16;
+        if n > 0
+            && unsafe { HidP_GetButtonCaps(HidP_Input, buttons.as_mut_ptr(), &mut n, self.0) }
+                == HIDP_STATUS_SUCCESS
+        {
+            for b in &buttons[..n as usize] {
+                // SAFETY: IsRange says which member of the union is filled.
+                let (lo, hi) = unsafe {
+                    if b.IsRange {
+                        (b.Anonymous.Range.UsageMin, b.Anonymous.Range.UsageMax)
+                    } else {
+                        (b.Anonymous.NotRange.Usage, b.Anonymous.NotRange.Usage)
+                    }
+                };
+                out.push(InputItem {
+                    report_id: b.ReportID,
+                    page: b.UsagePage,
+                    usage: lo,
+                    usage_max: hi,
+                    button: true,
+                    relative: !b.IsAbsolute,
+                });
+            }
+        }
+        let mut values: Vec<HIDP_VALUE_CAPS> =
+            (0..caps.NumberInputValueCaps).map(|_| Default::default()).collect();
+        let mut n = values.len() as u16;
+        if n > 0
+            && unsafe { HidP_GetValueCaps(HidP_Input, values.as_mut_ptr(), &mut n, self.0) }
+                == HIDP_STATUS_SUCCESS
+        {
+            for v in &values[..n as usize] {
+                // SAFETY: as above.
+                let (lo, hi) = unsafe {
+                    if v.IsRange {
+                        (v.Anonymous.Range.UsageMin, v.Anonymous.Range.UsageMax)
+                    } else {
+                        (v.Anonymous.NotRange.Usage, v.Anonymous.NotRange.Usage)
+                    }
+                };
+                out.push(InputItem {
+                    report_id: v.ReportID,
+                    page: v.UsagePage,
+                    usage: lo,
+                    usage_max: hi,
+                    button: false,
+                    relative: !v.IsAbsolute,
+                });
+            }
+        }
+        out.sort_by_key(|i| (i.report_id, i.page, i.usage));
+        out
+    }
+
+    /// The buttons an input report has down, as (usage page, usage).
+    pub fn pressed(&self, report: &[u8]) -> Vec<(u16, u16)> {
+        let mut list = [USAGE_AND_PAGE::default(); 32];
+        let mut n = list.len() as u32;
+        let status = unsafe {
+            HidP_GetUsagesEx(HidP_Input, None, list.as_mut_ptr(), &mut n, self.0, report)
+        };
+        if status != HIDP_STATUS_SUCCESS {
+            return Vec::new();
+        }
+        list[..n as usize].iter().map(|u| (u.UsagePage, u.Usage)).collect()
+    }
+
+    /// The single values an input report carries, as (usage page, usage,
+    /// value).
+    pub fn values(&self, report: &[u8]) -> Vec<(u16, u16, u32)> {
+        let Some(&id) = report.first() else { return Vec::new() };
+        self.inputs()
+            .into_iter()
+            .filter(|i| !i.button && i.report_id == id && i.usage == i.usage_max)
+            .filter_map(|i| {
+                let mut v = 0u32;
+                let status = unsafe {
+                    HidP_GetUsageValue(HidP_Input, i.page, None, i.usage, &mut v, self.0, report)
+                };
+                (status == HIDP_STATUS_SUCCESS).then_some((i.page, i.usage, v))
+            })
+            .collect()
+    }
+}
+
+impl Drop for Descriptor {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = HidD_FreePreparsedData(self.0);
+        }
+    }
 }
 
 /// A manual-reset event used to stop reader threads.
