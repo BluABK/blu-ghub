@@ -100,8 +100,15 @@ Description (probe): memory model 01, profile format 04, macro format 01,
 
 Reads: fn5 `[sector hi, lo, offset hi, lo]` → 16 bytes; the last read of a
 sector starts at size − 16. Each sector ends in a CRC-CCITT (poly 0x1021,
-init 0xFFFF) of the bytes before it, big-endian. Writes (fn6/7/8) and the
-mode switch (fn1) are never sent without an explicit, backed-up action.
+init 0xFFFF) of the bytes before it, big-endian.
+
+Writes (verified on this unit, through the receiver): fn6 `[sector hi, lo,
+offset hi, lo, count hi, lo]` (offset 0, count = sector size), then fn7 with
+16 bytes at a time (the last block zero-padded), then fn8 with no parameters
+in a **short** report, as libratbag does. A changed button in the active
+profile takes effect at once; no reload is needed. blu-ghub only writes a
+sector that first read back with a valid checksum, after saving it, and reads
+it back afterwards. The mode switch (fn1) is never sent.
 
 **Sector 0, directory:** 4-byte entries `[sector hi, sector lo, enabled, ff]`,
 `ff` padded.

@@ -521,6 +521,24 @@ impl Channel {
         }
     }
 
+    /// HID++ 2.0 request in a short report (up to 3 parameter bytes). Only a
+    /// few commands are specified this way (on-board memory's "write end");
+    /// the device must have a short collection.
+    pub fn request_short(
+        &mut self,
+        dev: u8,
+        feat: u8,
+        func: u8,
+        params: &[u8],
+    ) -> Result<Vec<u8>, HidppError> {
+        assert!(params.len() <= 3, "HID++ short reports carry at most 3 parameter bytes");
+        let addr = (func << 4) | SW_ID;
+        let mut report = vec![SHORT, dev, feat, addr];
+        report.extend_from_slice(params);
+        report.resize(SHORT_LEN, 0);
+        self.transact(&report, Expect { dev, sub: feat, addr })
+    }
+
     /// HID++ 1.0 register read. `long` reads (sub-id 0x83) return 16 bytes,
     /// short ones (0x81) 3; both are requested with a short report.
     pub fn read_register(

@@ -217,18 +217,27 @@ struct Logger {
     late_events: u64,
     injected_events: u64,
     finished: bool,
+    /// Print every press of a key that types nothing (F-keys, modifiers,
+    /// arrows), for checking what a key or G-key sends. Text keys stay
+    /// hidden.
+    echo: bool,
 }
 
 thread_local! {
     static LOGGER: RefCell<Option<Logger>> = const { RefCell::new(None) };
 }
 
-pub fn run(minutes: Option<u64>) -> Result<()> {
+pub fn run(minutes: Option<u64>, echo: bool) -> Result<()> {
     let mut tee = Tee::create("keys");
     tee.line(&format!("BluGHub-diag keys {} at {}", crate::version(), now_stamp()));
     tee.line("Watching every keyboard through Raw Input (no hook, cannot affect typing).");
     tee.line("Text keys appear only as anonymous ids. Press Scroll Lock twice quickly to mark an");
     tee.line("incident (dumps the last 15 s). Ctrl+C or closing this window stops and summarises.");
+    if echo {
+        tee.line(
+            "--echo: printing every press of a key that types nothing (F-keys, modifiers, ...).",
+        );
+    }
     tee.flush();
 
     let mut f = 0i64;
@@ -262,6 +271,7 @@ pub fn run(minutes: Option<u64>) -> Result<()> {
             late_events: 0,
             injected_events: 0,
             finished: false,
+            echo,
         })
     });
 
@@ -658,6 +668,12 @@ impl Logger {
                 gap as f64 / 1000.0
             ));
         }
+        if self.echo
+            && let Some(name) = key.name()
+        {
+            let dev_name = self.dev_names[dev].clone();
+            self.out.line(format!("{} pressed {name:<12} on {dev_name}", now_stamp()));
+        }
         if vkey == VK_SCROLL.0 {
             if self.last_mark.is_some_and(|p| t.saturating_sub(p) < MARK_DOUBLE_US) {
                 self.last_mark = None;
@@ -1008,6 +1024,7 @@ mod tests {
             late_events: 0,
             injected_events: 0,
             finished: false,
+            echo: false,
         };
         // Start well past the warm-up window.
         l.settle_pending(0, 10_000 * MS, None);

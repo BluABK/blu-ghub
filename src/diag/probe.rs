@@ -9,9 +9,6 @@
 //! is not touched at all: one implementation's "harmless" call clears its key
 //! list.
 //!
-//! `dump-onboard` additionally reads the keyboard's on-board profile memory,
-//! sector by sector, into files: the backup that must exist before anything
-//! is ever written there.
 
 use anyhow::{Result, bail};
 
@@ -365,101 +362,5 @@ fn report_unsolicited(out: &mut Out, ch: &mut Channel) {
             super::sniff::decode(&r.data).to_string(),
             hex(&r.data)
         ));
-    }
-}
-
-/// CRC-CCITT (polynomial 0x1021, initial 0xFFFF) over a sector's contents,
-/// as the on-board profile format stores in each sector's last two bytes.
-pub fn crc_ccitt(data: &[u8]) -> u16 {
-    let mut crc: u16 = 0xFFFF;
-    for &b in data {
-        crc ^= (b as u16) << 8;
-        for _ in 0..8 {
-            crc = if crc & 0x8000 != 0 { (crc << 1) ^ 0x1021 } else { crc << 1 };
-        }
-    }
-    crc
-}
-
-/// Read the G915's on-board profile memory into files: one `.bin` per
-/// sector, plus an index with each sector's stored and computed checksum.
-pub fn dump_onboard() -> Result<()> {
-    let _lock = hidpp::acquire_lock()?;
-    let mut out = Tee::create("onboard");
-    out.line(&format!("BluGHub-diag dump-onboard {} at {}", crate::version(), now_stamp()));
-    let all = hid::logitech_collections()?;
-
-    let (mut ch, dev) = if let cols @ [_, ..] = hidpp::hidpp_collections(&all, 0xC547).as_slice() {
-        (Channel::open(cols, "receiver")?, 1u8)
-    } else if let cols @ [_, ..] = hidpp::hidpp_collections(&all, 0xC33E).as_slice() {
-        (Channel::open(cols, "G915 wired")?, RECEIVER)
-    } else {
-        bail!("no G915 found (receiver C547 or cable C33E)");
-    };
-    let Some((i, _, _)) = ch.feature_index(dev, f::ONBOARD_PROFILES)? else {
-        bail!("the keyboard has no ONBOARD_PROFILES feature");
-    };
-    let d = ch.request(dev, i, 0, &[])?;
-    let (profiles, rom_profiles, sectors) = (d[3], d[4], d[6]);
-    let size = u16::from_be_bytes([d[7], d[8]]) as usize;
-    out.line(&format!(
-        "description: {}  (profiles {profiles}, ROM profiles {rom_profiles}, sectors {sectors}, \
-         sector size {size})",
-        hex(trim(&d))
-    ));
-    if !(16..=4096).contains(&size) {
-        bail!("implausible sector size {size}");
-    }
-
-    let dir = out.path.with_extension("");
-    crate::app_paths::ensure_dir(&dir);
-    let mut list: Vec<u16> = (0..sectors as u16).collect();
-    list.extend((0..rom_profiles as u16).map(|n| 0x0100 + n));
-    for sector in list {
-        let mut data = vec![0u8; size];
-        let mut offset = 0usize;
-        let mut failed = None;
-        while offset < size {
-            // Reads are 16 bytes; the last one is pulled back so it ends
-            // exactly at the sector's end (the device refuses reads past it).
-            let at = offset.min(size - 16);
-            let params = [(sector >> 8) as u8, sector as u8, (at >> 8) as u8, at as u8];
-            match ch.request(dev, i, 5, &params) {
-                Ok(p) => data[at..at + 16].copy_from_slice(&p[..16]),
-                Err(e) => {
-                    failed = Some(e);
-                    break;
-                }
-            }
-            offset = at + 16;
-        }
-        if let Some(e) = failed {
-            out.line(&format!("sector {sector:04X}: {e}"));
-            continue;
-        }
-        let stored = u16::from_be_bytes([data[size - 2], data[size - 1]]);
-        let computed = crc_ccitt(&data[..size - 2]);
-        let empty = data.iter().all(|&b| b == 0xFF);
-        let path = dir.join(format!("sector-{sector:04X}.bin"));
-        std::fs::write(&path, &data)?;
-        out.line(&format!(
-            "sector {sector:04X}: {size} bytes, crc stored {stored:04X} computed {computed:04X} {}{}",
-            if stored == computed { "OK" } else { "MISMATCH" },
-            if empty { " (erased)" } else { "" }
-        ));
-    }
-    out.line(&format!("Sectors written to {}", dir.display()));
-    out.flush();
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn crc_ccitt_matches_the_standard_check_value() {
-        // CRC-16/CCITT-FALSE of "123456789" is 0x29B1.
-        assert_eq!(crc_ccitt(b"123456789"), 0x29B1);
     }
 }

@@ -22,6 +22,7 @@ pub mod hid;
 pub mod hidpp;
 pub mod icon_art;
 pub mod keynames;
+pub mod onboard;
 pub mod platform;
 
 // The build script's target-folder cleanup, compiled here only so its tests

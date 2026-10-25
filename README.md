@@ -81,8 +81,25 @@ A console program. `caps`, `keys` and `sniff` send nothing to any device;
 | `BluGHub-diag probe` | Asks the receiver, keyboard and headset what they are and support: feature table, name, firmware, battery, on-board profile mode, lighting zones and effects. Only "get" requests. |
 | `BluGHub-diag dump-onboard` | Reads the keyboard's on-board profile memory into one file per sector, with checksums: the backup to have before anything is ever written there. |
 
-`probe` and `dump-onboard` refuse to run while another blu-ghub process is
-talking to the devices. What they found is written up in
+### Changing the keyboard's on-board G-keys
+
+The G-keys live in the keyboard's own memory, one set per M1/M2/M3 profile,
+and work with nothing installed. These commands change them:
+
+| Command | What it does |
+|---|---|
+| `BluGHub-diag set-gkeys 2 G3=F15 G5=LCtrl G1=off` | Sets G-keys in profile 2 (M2). Keys: `F1`-`F24`, `LCtrl` `LShift` `LAlt` `LWin` (and `R...`), `off`, or `usage:0xNN`. |
+| `BluGHub-diag write-test 2` | Writes profile 2 back unchanged, to prove the write path. |
+| `BluGHub-diag restore-sector 2 FILE` | Puts a saved copy of a profile back. |
+| `BluGHub-diag keys --echo` | Prints each press of a non-text key (F-keys, modifiers, ...) to check the result. |
+
+Each write first reads the profile and checks its checksum, saves it to
+`%APPDATA%\BluGHub\diag\<command>-<time>\sector-000N.bin` (the file
+`restore-sector` takes), then writes and reads it back to compare. A change to
+the active profile takes effect immediately.
+
+`probe`, `dump-onboard` and the writing commands refuse to run while another
+blu-ghub process is talking to the devices. What they found is written up in
 [docs/protocol-g915.md](docs/protocol-g915.md) and
 [docs/protocol-g935.md](docs/protocol-g935.md).
 

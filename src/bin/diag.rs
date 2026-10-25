@@ -12,15 +12,29 @@
 use anyhow::{Result, bail};
 
 fn usage() -> &'static str {
-    "usage:\n  BluGHub-diag caps\n  BluGHub-diag keys  [--minutes N]\n  BluGHub-diag sniff [--minutes N]\n  \
+    "usage:\n  BluGHub-diag caps\n  BluGHub-diag keys  [--minutes N] [--echo]\n  BluGHub-diag sniff [--minutes N]\n  \
      BluGHub-diag probe\n  BluGHub-diag dump-onboard\n\n\
+     Writing the keyboard's on-board memory (each saves a backup first and\n\
+     verifies the result):\n  \
+     BluGHub-diag write-test SECTOR          write a profile back unchanged\n  \
+     BluGHub-diag set-gkeys SECTOR G3=F15 G5=LCtrl G1=off ...\n  \
+     BluGHub-diag restore-sector SECTOR FILE put a saved sector back\n\n\
      caps, keys and sniff send nothing to any device; probe and dump-onboard send\n\
-     read requests only. Logs go to %APPDATA%\\BluGHub\\diag\\."
+     read requests only; only the three commands above write. Logs go to %APPDATA%\\BluGHub\\diag\\."
+}
+
+fn parse_sector(s: &str) -> Result<u16> {
+    let v = match s.strip_prefix("0x") {
+        Some(h) => u16::from_str_radix(h, 16),
+        None => s.parse(),
+    };
+    v.map_err(|_| anyhow::anyhow!("bad sector number: {s}"))
 }
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut minutes = None;
+    let mut echo = false;
     let mut rest = Vec::new();
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -30,6 +44,7 @@ fn main() -> Result<()> {
                 minutes =
                     Some(v.parse::<u64>().map_err(|_| anyhow::anyhow!("bad --minutes: {v}"))?);
             }
+            "--echo" => echo = true,
             "-h" | "--help" => {
                 println!("{}", usage());
                 return Ok(());
@@ -40,8 +55,15 @@ fn main() -> Result<()> {
     match rest.as_slice() {
         ["caps"] => blu_ghub::diag::caps::run(),
         ["probe"] => blu_ghub::diag::probe::run(),
-        ["dump-onboard"] => blu_ghub::diag::probe::dump_onboard(),
-        ["keys"] => blu_ghub::diag::keys::run(minutes),
+        ["dump-onboard"] => blu_ghub::diag::onboard::dump(),
+        ["write-test", sector] => blu_ghub::diag::onboard::write_test(parse_sector(sector)?),
+        ["set-gkeys", sector, assignments @ ..] => {
+            blu_ghub::diag::onboard::set_gkeys(parse_sector(sector)?, assignments)
+        }
+        ["restore-sector", sector, file] => {
+            blu_ghub::diag::onboard::restore(parse_sector(sector)?, std::path::Path::new(file))
+        }
+        ["keys"] => blu_ghub::diag::keys::run(minutes, echo),
         ["sniff"] => blu_ghub::diag::sniff::run(minutes),
         _ => bail!("{}", usage()),
     }

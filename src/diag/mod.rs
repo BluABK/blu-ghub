@@ -5,6 +5,7 @@
 
 pub mod caps;
 pub mod keys;
+pub mod onboard;
 pub mod probe;
 pub mod sniff;
 
