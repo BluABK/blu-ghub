@@ -20,7 +20,7 @@
 //! device — is queued for the caller rather than mistaken for an answer.
 
 use std::collections::VecDeque;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -194,6 +194,30 @@ pub struct Incoming {
     pub data: Vec<u8>,
 }
 
+/// Pseudo-endpoints on the report queue: a message from the owner of the
+/// channel, and a reader announcing that its device went away.
+const CONTROL: usize = usize::MAX;
+const GONE: usize = usize::MAX - 1;
+
+/// Wakes a thread blocked in [`Channel::wait_event`] with a control code.
+#[derive(Clone)]
+pub struct Waker(Sender<Report>);
+
+impl Waker {
+    pub fn wake(&self, code: u8) {
+        let _ = self.0.send(Report { endpoint: CONTROL, at: Instant::now(), data: vec![code] });
+    }
+}
+
+/// What [`Channel::wait_event`] returns.
+#[derive(Debug, Clone)]
+pub enum Event {
+    /// A report that was not a reply to one of our requests.
+    Report(Incoming),
+    /// A control code sent through a [`Waker`].
+    Control(u8),
+}
+
 /// Holds the machine-wide "I am talking HID++ to these devices" lock, so two
 /// blu-ghub processes (the tray app and a probe) never interleave requests.
 pub struct HidppLock(HANDLE);
@@ -231,9 +255,12 @@ pub struct Channel {
     short: Option<Endpoint>,
     long: Endpoint,
     rx: Receiver<Report>,
+    tx: Sender<Report>,
     stop: StopEvent,
     readers: Vec<JoinHandle<()>>,
     queued: VecDeque<Incoming>,
+    controls: VecDeque<u8>,
+    gone: bool,
     pub label: String,
     pub timeout: Duration,
 }
@@ -260,7 +287,12 @@ impl Channel {
             readers.push(std::thread::Builder::new().name(format!("hidpp-read-{n}")).spawn(
                 move || {
                     let stop = HANDLE(stop_raw as *mut _);
-                    let _ = hid::read_reports(n, &reader, len, stop, &tx);
+                    if let hid::ReaderEnd::Gone(why) = hid::read_reports(n, &reader, len, stop, &tx)
+                    {
+                        let report =
+                            Report { endpoint: GONE, at: Instant::now(), data: why.into_bytes() };
+                        let _ = tx.send(report);
+                    }
                 },
             )?);
             Ok(Endpoint { handle: h, out_len: info.output_len as usize })
@@ -274,12 +306,51 @@ impl Channel {
             short,
             long,
             rx,
+            tx,
             stop,
             readers,
             queued: VecDeque::new(),
+            controls: VecDeque::new(),
+            gone: false,
             label: label.to_string(),
             timeout: Duration::from_millis(1000),
         })
+    }
+
+    /// A handle another thread can use to wake [`Channel::wait_event`].
+    pub fn waker(&self) -> Waker {
+        Waker(self.tx.clone())
+    }
+
+    /// Sort one report from the queue into its place.
+    fn accept(&mut self, r: Report) {
+        match r.endpoint {
+            CONTROL => self.controls.extend(r.data.first()),
+            GONE => self.gone = true,
+            _ => self.queued.push_back(Incoming { at: r.at, data: r.data }),
+        }
+    }
+
+    /// Block until something happens: a report that is not a reply to us, a
+    /// control code, or `timeout` passing (`Ok(None)`). An error means the
+    /// device went away; the channel is then useless.
+    pub fn wait_event(&mut self, timeout: Duration) -> Result<Option<Event>, HidppError> {
+        loop {
+            if let Some(c) = self.controls.pop_front() {
+                return Ok(Some(Event::Control(c)));
+            }
+            if let Some(r) = self.queued.pop_front() {
+                return Ok(Some(Event::Report(r)));
+            }
+            if self.gone {
+                return Err(HidppError::Io(format!("{}: device gone", self.label)));
+            }
+            match self.rx.recv_timeout(timeout) {
+                Ok(r) => self.accept(r),
+                Err(RecvTimeoutError::Timeout) => return Ok(None),
+                Err(RecvTimeoutError::Disconnected) => self.gone = true,
+            }
+        }
     }
 
     /// Reports that arrived and were not replies to us, oldest first.
@@ -292,10 +363,10 @@ impl Channel {
     /// for the first report.
     fn pump(&mut self, wait: Duration) {
         if let Ok(r) = self.rx.recv_timeout(wait) {
-            self.queued.push_back(Incoming { at: r.at, data: r.data });
+            self.accept(r);
         }
         while let Ok(r) = self.rx.try_recv() {
-            self.queued.push_back(Incoming { at: r.at, data: r.data });
+            self.accept(r);
         }
     }
 
@@ -314,6 +385,9 @@ impl Channel {
     fn transact(&mut self, report: &[u8], expect: Expect) -> Result<Vec<u8>, HidppError> {
         // Anything that arrived before this request cannot be its reply.
         self.pump(Duration::ZERO);
+        if self.gone {
+            return Err(HidppError::Io(format!("{}: device gone", self.label)));
+        }
         let first_new = self.queued.len();
         self.send(report)?;
         let deadline = Instant::now() + self.timeout;
@@ -340,7 +414,12 @@ impl Channel {
                 return Err(HidppError::Timeout);
             }
             match self.rx.recv_timeout(deadline - now) {
-                Ok(r) => self.queued.push_back(Incoming { at: r.at, data: r.data }),
+                Ok(r) => {
+                    self.accept(r);
+                    if self.gone {
+                        return Err(HidppError::Io(format!("{}: device gone", self.label)));
+                    }
+                }
                 Err(RecvTimeoutError::Timeout) => return Err(HidppError::Timeout),
                 Err(RecvTimeoutError::Disconnected) => {
                     return Err(HidppError::Io(format!("{}: device gone", self.label)));

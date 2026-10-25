@@ -1,5 +1,13 @@
 use std::process::Command;
 
+// The same drawing the app uses for its tray icon. Included rather than
+// imported: a build script is its own crate and cannot reach into the one it
+// is building, and drawing the icon twice would let the two drift apart.
+#[cfg(windows)]
+mod icon_art {
+    include!("src/icon_art.rs");
+}
+
 // Keeps `target/` from growing without bound; see the module's own docs.
 #[path = "build_support/target_gc.rs"]
 mod target_gc;
@@ -35,4 +43,32 @@ fn main() {
     // own targets are not rebuilt on every run, and the cleanup must leave
     // their earlier builds alone.
     target_gc::run_from_build_script(false);
+
+    #[cfg(windows)]
+    {
+        embed_icon();
+        embed_manifest::embed_manifest(embed_manifest::new_manifest("BluGHub"))
+            .expect("embedding the application manifest");
+    }
+}
+
+/// Put the icon inside the executable, where Explorer, the Start Menu and the
+/// taskbar look for it. A missing resource compiler is a warning: it costs
+/// the icon, not the build.
+#[cfg(windows)]
+fn embed_icon() {
+    println!("cargo:rerun-if-changed=src/icon_art.rs");
+    let out = std::path::PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
+    let ico = out.join("BluGHub.ico");
+    if let Err(e) = std::fs::write(&ico, icon_art::ico(icon_art::SIZES)) {
+        println!("cargo:warning=could not write {}: {e}", ico.display());
+        return;
+    }
+    let mut res = winresource::WindowsResource::new();
+    res.set_icon(&ico.to_string_lossy());
+    res.set("FileDescription", "BluGHub - battery, lighting and keys for a G915 and a G935");
+    res.set("ProductName", "BluGHub");
+    if let Err(e) = res.compile() {
+        println!("cargo:warning=icon not embedded (no resource compiler?): {e}");
+    }
 }

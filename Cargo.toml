@@ -12,8 +12,20 @@ build = "build.rs"
 # the output. Keeping them apart also guarantees the key logger never shares a
 # process (and so a raw-input registration) with the settings window.
 [[bin]]
+name = "BluGHub"
+path = "src/main.rs"
+
+[[bin]]
 name = "BluGHub-diag"
 path = "src/bin/diag.rs"
+
+# The icon and the application manifest are compiled into the exe. A missing
+# resource compiler costs the icon, not the build (see build.rs).
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+# Per-monitor DPI awareness (crisp tray icon and menus), modern common
+# controls, UTF-8 and long paths.
+embed-manifest = "1.4"
 
 [dependencies]
 anyhow = "1.0"
@@ -21,6 +33,13 @@ anyhow = "1.0"
 # timezone database and serde support are not needed.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 directories = "6.0"
+# Writes the HKCU Run entry for "Start with Windows", as TunMan does.
+auto-launch = "0.6"
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
 
 # HID access goes straight through Windows (HidD_*/HidP_*, overlapped
 # ReadFile/WriteFile) rather than the hidapi crate: hidapi pads every write to
@@ -41,9 +60,12 @@ windows = { version = "0.62", features = [
     "Win32_System_LibraryLoader",
     "Win32_System_Performance",
     "Win32_System_SystemInformation",
+    "Win32_System_Com",
+    "Win32_System_Power",
     "Win32_System_Threading",
     "Win32_UI_Input",
     "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
 

@@ -10,11 +10,16 @@
 #[cfg(not(windows))]
 compile_error!("blu-ghub talks to the Windows HID stack and only builds on Windows");
 
+pub mod app;
 pub mod app_paths;
+pub mod battery;
+pub mod config;
 pub mod diag;
 pub mod hid;
 pub mod hidpp;
+pub mod icon_art;
 pub mod keynames;
+pub mod platform;
 
 // The build script's target-folder cleanup, compiled here only so its tests
 // run with the rest of the suite.
