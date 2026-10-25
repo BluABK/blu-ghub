@@ -1,9 +1,12 @@
-//! BluGHub: the tray app. Battery levels for the G915 and G935 now; lighting
-//! and keys to follow.
+//! BluGHub: the tray app. Battery levels for the G915 and G935, the G935's
+//! buttons, and a settings window; lighting and macros to follow.
 //!
-//!   BluGHub            start (or, if already running, say so from the tray)
-//!   BluGHub --hidden   the same; used by "Start with Windows"
-//!   BluGHub --quit     ask the running instance to quit
+//!   BluGHub                    start (or, if already running, open its
+//!                              settings window)
+//!   BluGHub --hidden           the same; used by "Start with Windows"
+//!   BluGHub --quit             ask the running instance to quit
+//!   BluGHub --settings-gate N  open and close the settings window N times
+//!                              (20 by default), logging private memory
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 

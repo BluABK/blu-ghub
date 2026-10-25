@@ -36,7 +36,7 @@ Quit
 ```
 
 **Settings…** opens a window with each device's state, battery, voltage and
-how old the reading is (for now that is all it shows). The window exists only
+the time of the reading (for now that is all it shows). The window exists only
 while it is open: closing it frees its renderer, and the Direct3D driver hands
 its memory back some seconds later. While open and untouched it draws
 nothing; only the graphics driver keeps time with the display.

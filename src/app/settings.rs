@@ -14,7 +14,7 @@
 //!   panic in a window procedure aborts. [`is_open`] covers the whole call.
 
 use std::cell::{Cell, RefCell};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
 use eframe::wgpu::rwh::{HasWindowHandle, RawWindowHandle};
@@ -124,15 +124,16 @@ fn icon(size_metric: windows::Win32::UI::WindowsAndMessaging::SYSTEM_METRICS_IND
     .unwrap_or_default()
 }
 
-/// Open the window and return once it has closed. `auto_close` closes it by
+/// Open the window and return once it has closed; `Ok(false)` if it was
+/// already open and has been raised instead. `auto_close` closes it by
 /// itself after that long (for measuring open/close cycles).
 ///
 /// Must not be called while the app state is borrowed: the tray's messages
 /// are dispatched while it runs.
-pub fn run(shared: Shared, auto_close: Option<Duration>) -> Result<()> {
+pub fn run(shared: Shared, auto_close: Option<Duration>) -> Result<bool> {
     if is_open() {
         raise();
-        return Ok(());
+        return Ok(false);
     }
     RUNNING.with(|r| r.set(true));
     // The window's icons, set by hand: eframe's own way picks whichever
@@ -183,6 +184,9 @@ pub fn run(shared: Shared, auto_close: Option<Duration>) -> Result<()> {
     CONTEXT.with(|c| *c.borrow_mut() = None);
     WINDOW.with(|w| w.set(None));
     RUNNING.with(|r| r.set(false));
+    // Also when eframe failed before reaching the creator, after winit had
+    // already registered.
+    drop_raw_input();
     for (_, icon) in icons {
         if !icon.is_invalid() {
             unsafe {
@@ -190,7 +194,7 @@ pub fn run(shared: Shared, auto_close: Option<Duration>) -> Result<()> {
             }
         }
     }
-    result.map_err(|e| anyhow!("settings window: {e}"))
+    result.map(|()| true).map_err(|e| anyhow!("settings window: {e}"))
 }
 
 struct Settings {
@@ -249,16 +253,20 @@ impl eframe::App for Settings {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.painted = self.painted.saturating_add(1);
-        if self.frame_times.len() < 200 {
-            self.frame_times.push(self.opened.elapsed().as_secs_f32());
-        }
-        let causes = ui.ctx().repaint_causes();
-        if causes.is_empty() {
-            *self.causes.entry("a window event".into()).or_default() += 1;
-        }
-        for c in causes {
-            *self.causes.entry(c.to_string()).or_default() += 1;
+        // A frame can take more than one pass (a new grid sizes itself in
+        // a second one); count frames.
+        if ui.ctx().current_pass_index() == 0 {
+            self.painted = self.painted.saturating_add(1);
+            if self.frame_times.len() < 200 {
+                self.frame_times.push(self.opened.elapsed().as_secs_f32());
+            }
+            let causes = ui.ctx().repaint_causes();
+            if causes.is_empty() {
+                *self.causes.entry("a window event".into()).or_default() += 1;
+            }
+            for c in causes {
+                *self.causes.entry(c.to_string()).or_default() += 1;
+            }
         }
         let status = self.shared.lock().unwrap_or_else(|e| e.into_inner()).clone();
         egui::CentralPanel::default().show(ui, |ui| {
@@ -267,7 +275,7 @@ impl eframe::App for Settings {
             egui::Grid::new("devices").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
                 for device in [Device::Keyboard, Device::Headset] {
                     ui.strong(device.name());
-                    ui.label(device_line(device, &status, SystemTime::now()));
+                    ui.label(device_line(device, &status));
                     ui.end_row();
                 }
             });
@@ -275,16 +283,18 @@ impl eframe::App for Settings {
     }
 }
 
-/// "71%, 4078 mV, read 3 min ago", "asleep; last 91%, 4078 mV, read 2 h ago".
-fn device_line(device: Device, status: &Status, now: SystemTime) -> String {
+/// "71%, 4078 mV, read at 14:32", "asleep; last 91%, 4078 mV, read at 09:05".
+/// The time of day rather than an age, which would go stale in a window
+/// that draws nothing until something changes.
+fn device_line(device: Device, status: &Status) -> String {
     let s = status.device(device);
     let off = if device == Device::Headset { "switched off" } else { "asleep" };
     // Status::device prefers the cable while it is plugged in.
     let cable = device == Device::Keyboard && status.keyboard_cable.state != State::Absent;
     let via = if cable { " (cable)" } else { "" };
     let reading = s.battery.as_ref().map(|b| {
-        let age = now.duration_since(b.at).map(age).unwrap_or_else(|_| "just now".into());
-        format!("{}, {} mV, read {age}", b.short(), b.millivolts)
+        let at = chrono::DateTime::<chrono::Local>::from(b.at).format("%H:%M");
+        format!("{}, {} mV, read at {at}", b.short(), b.millivolts)
     });
     match (&s.state, reading) {
         (State::Absent, _) => "not connected".into(),
@@ -295,46 +305,28 @@ fn device_line(device: Device, status: &Status, now: SystemTime) -> String {
     }
 }
 
-/// "just now", "3 min ago", "2 h ago".
-fn age(d: Duration) -> String {
-    let s = d.as_secs();
-    match s {
-        0..60 => "just now".into(),
-        60..3600 => format!("{} min ago", s / 60),
-        _ => format!("{} h ago", s / 3600),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn ages_read_naturally() {
-        assert_eq!(age(Duration::from_secs(5)), "just now");
-        assert_eq!(age(Duration::from_secs(185)), "3 min ago");
-        assert_eq!(age(Duration::from_secs(7300)), "2 h ago");
-    }
-
-    #[test]
-    fn a_sleeping_keyboard_shows_its_last_reading_and_age() {
+    fn a_sleeping_keyboard_shows_its_last_reading_and_when() {
         let mut s = Status::default();
         s.keyboard_receiver.state = State::Sleeping;
-        let mut b = crate::battery::from_g915(&[0x0F, 0xEE, 0x00]).unwrap();
-        let now = SystemTime::now();
-        b.at = now - Duration::from_secs(7300);
+        let b = crate::battery::from_g915(&[0x0F, 0xEE, 0x00]).unwrap();
+        let at = chrono::DateTime::<chrono::Local>::from(b.at).format("%H:%M").to_string();
         s.keyboard_receiver.battery = Some(b);
         assert_eq!(
-            device_line(Device::Keyboard, &s, now),
-            "asleep; last 91%, 4078 mV, read 2 h ago"
+            device_line(Device::Keyboard, &s),
+            format!("asleep; last 91%, 4078 mV, read at {at}")
         );
-        assert_eq!(device_line(Device::Headset, &s, now), "not connected");
+        assert_eq!(device_line(Device::Headset, &s), "not connected");
     }
 
     #[test]
     fn the_keyboard_on_its_cable_says_so() {
         let mut s = Status::default();
         s.keyboard_cable.state = State::Connected;
-        assert_eq!(device_line(Device::Keyboard, &s, SystemTime::now()), "connected (cable)");
+        assert_eq!(device_line(Device::Keyboard, &s), "connected (cable)");
     }
 }

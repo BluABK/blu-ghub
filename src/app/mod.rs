@@ -47,14 +47,15 @@ use windows::Win32::UI::Shell::{
     Shell_NotifyIconW, ShellExecuteW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreateIconFromResourceEx, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
-    DestroyIcon, DestroyMenu, DestroyWindow, DispatchMessageW, ENDSESSION_CLOSEAPP, FindWindowW,
-    GetMessageW, GetSystemMetrics, GetWindowThreadProcessId, HICON, KillTimer, LR_DEFAULTCOLOR,
-    MF_CHECKED, MF_GRAYED, MF_SEPARATOR, MF_STRING, MSG, PBT_APMRESUMEAUTOMATIC, PostMessageW,
-    PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SM_CXSMICON, SMTO_ABORTIFHUNG,
-    SW_SHOWNORMAL, SendMessageTimeoutW, SetForegroundWindow, SetTimer, TPM_NONOTIFY, TPM_RETURNCMD,
-    TPM_RIGHTBUTTON, TrackPopupMenuEx, WINDOW_EX_STYLE, WM_APP, WM_CLOSE, WM_CONTEXTMENU,
-    WM_DESTROY, WM_ENDSESSION, WM_NULL, WM_POWERBROADCAST, WM_TIMER, WNDCLASSW, WS_OVERLAPPED,
+    AllowSetForegroundWindow, AppendMenuW, CreateIconFromResourceEx, CreatePopupMenu,
+    CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu, DestroyWindow, DispatchMessageW,
+    ENDSESSION_CLOSEAPP, FindWindowW, GetMessageW, GetSystemMetrics, GetWindowThreadProcessId,
+    HICON, KillTimer, LR_DEFAULTCOLOR, MF_CHECKED, MF_GRAYED, MF_SEPARATOR, MF_STRING, MSG,
+    PBT_APMRESUMEAUTOMATIC, PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW,
+    SM_CXSMICON, SMTO_ABORTIFHUNG, SW_SHOWNORMAL, SendMessageTimeoutW, SetForegroundWindow,
+    SetTimer, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx, WINDOW_EX_STYLE,
+    WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_ENDSESSION, WM_NULL, WM_POWERBROADCAST,
+    WM_TIMER, WNDCLASSW, WS_OVERLAPPED,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
@@ -181,6 +182,14 @@ fn single_instance() -> Result<Option<HANDLE>> {
     }
     // Another instance. If it answers, it is alive: let it show itself.
     if let Some(h) = running_window() {
+        // This launch was started by the user and may take the foreground;
+        // the running instance, which opens the window, may not unless
+        // handed the right.
+        let mut pid = 0u32;
+        unsafe {
+            GetWindowThreadProcessId(h, Some(&mut pid));
+            let _ = AllowSetForegroundWindow(pid);
+        }
         let mut answer = 0usize;
         let ok = unsafe {
             SendMessageTimeoutW(
@@ -426,7 +435,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 if let Some(Some(status)) = snapshot {
                     match show_menu(hwnd, &status, point_from(wparam.0)) {
                         IDM_LOGS => open_logs_folder(),
-                        IDM_SETTINGS => open_settings(None),
+                        IDM_SETTINGS => {
+                            open_settings(None);
+                        }
                         cmd => {
                             with_app(|a| a.on_command(cmd));
                         }
@@ -475,7 +486,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_APP_SETTINGS => {
             match wparam.0 {
-                0 => open_settings(None),
+                0 => {
+                    open_settings(None);
+                }
                 cycles => {
                     GATE.with(|g| g.set((0, cycles)));
                     settings_gate_step(hwnd);
@@ -553,16 +566,22 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
 /// Open the settings window and return once it is closed. Outside the
 /// app-state borrow: the window runs a message loop of its own, which
 /// dispatches this window's messages meanwhile.
-fn open_settings(auto_close: Option<Duration>) {
+/// Returns whether a window ran (rather than an open one being raised).
+fn open_settings(auto_close: Option<Duration>) -> bool {
     let Some(Some(shared)) = with_app(|a| (!a.shut_down).then(|| a.shared.clone())) else {
-        return;
+        return false;
     };
-    if let Err(e) = settings::run(shared, auto_close) {
-        warn!("{e:#}");
-    }
+    let ran = match settings::run(shared, auto_close) {
+        Ok(ran) => ran,
+        Err(e) => {
+            warn!("{e:#}");
+            true
+        }
+    };
     if !settings::is_open() && QUIT_AFTER_SETTINGS.with(|q| q.replace(false)) {
         unsafe { PostQuitMessage(0) };
     }
+    ran
 }
 
 /// `--settings-gate [N]`: open the settings window for 3 s and close it, N
@@ -580,11 +599,14 @@ fn settings_gate_step(hwnd: HWND) {
         info!("settings gate: {total} cycles done");
         return;
     }
-    open_settings(Some(Duration::from_secs(3)));
-    if QUIT_AFTER_SETTINGS.with(|q| q.get()) || with_app(|a| a.shut_down).unwrap_or(true) {
+    let ran = open_settings(Some(Duration::from_secs(3)));
+    if with_app(|a| a.shut_down).unwrap_or(true) {
         return;
     }
-    GATE.with(|g| g.set((done + 1, total)));
+    // A window was already open (from the menu): this cycle did not happen.
+    if ran {
+        GATE.with(|g| g.set((done + 1, total)));
+    }
     unsafe { SetTimer(Some(hwnd), GATE_TIMER, GATE_SETTLE_MS, None) };
 }
 
