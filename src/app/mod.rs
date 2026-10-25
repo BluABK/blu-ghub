@@ -74,6 +74,7 @@ struct App {
     workers: Vec<Worker>,
     /// Devices already warned about, cleared once charged again.
     warned_low: [bool; 2],
+    shut_down: bool,
     _hidpp_lock: Option<hidpp::HidppLock>,
 }
 
@@ -164,6 +165,7 @@ pub fn run(args: &[String]) -> Result<()> {
             config,
             workers: Vec::new(),
             warned_low: [false; 2],
+            shut_down: false,
             _hidpp_lock: lock,
         })
     });
@@ -271,7 +273,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             // NOTIFYICON_VERSION_4: the event is in LOWORD(lparam).
             let event = (lparam.0 & 0xFFFF) as u32;
             if event == WM_CONTEXTMENU || event == NIN_SELECT || event == NIN_SELECT + 1 {
-                with_app(|a| a.show_menu());
+                // The menu runs a modal loop that dispatches other messages
+                // (battery updates, hotplug) back into this procedure, so it
+                // must not run inside a borrow of the app state.
+                let snapshot = with_app(|a| (a.hwnd, a.shared.lock().unwrap().clone()));
+                if let Some((hwnd, status)) = snapshot {
+                    let cmd = show_menu(hwnd, &status);
+                    with_app(|a| a.on_command(cmd));
+                }
             }
             LRESULT(0)
         }
@@ -464,6 +473,11 @@ impl App {
     }
 
     fn shutdown(&mut self) {
+        // Runs on WM_ENDSESSION and again on WM_DESTROY; only once matters.
+        if self.shut_down {
+            return;
+        }
+        self.shut_down = true;
         let started = Instant::now();
         for w in std::mem::take(&mut self.workers) {
             w.stop();
@@ -476,63 +490,66 @@ impl App {
         }
     }
 
-    fn show_menu(&mut self) {
-        let s = self.shared.lock().unwrap().clone();
-        let Ok(menu) = (unsafe { CreatePopupMenu() }) else { return };
-        unsafe {
-            for (i, kind) in [Kind::Keyboard, Kind::Headset].into_iter().enumerate() {
-                let line = HSTRING::from(describe(kind, &s));
-                let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 100 + i, &line);
+    fn on_command(&mut self, cmd: usize) {
+        match cmd {
+            IDM_REFRESH => self.workers.iter().for_each(|w| w.refresh()),
+            IDM_AUTOSTART => {
+                let on = !platform::starts_with_windows();
+                if let Err(e) = platform::set_start_with_windows(on) {
+                    warn!("Start with Windows: {e:#}");
+                }
             }
-            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-            let _ = AppendMenuW(menu, MF_STRING, IDM_REFRESH, w!("Read batteries now"));
-            let autostart = if platform::starts_with_windows() { MF_CHECKED } else { MF_STRING };
-            let _ =
-                AppendMenuW(menu, MF_STRING | autostart, IDM_AUTOSTART, w!("Start with Windows"));
-            let _ = AppendMenuW(menu, MF_STRING, IDM_LOGS, w!("Open log folder"));
-            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-            let _ = AppendMenuW(menu, MF_STRING, IDM_QUIT, w!("Quit"));
-
-            let mut pt = POINT::default();
-            let _ = GetCursorPos(&mut pt);
-            // Without this the menu does not close when you click elsewhere.
-            let _ = SetForegroundWindow(self.hwnd);
-            let cmd = TrackPopupMenuEx(
-                menu,
-                (TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY).0,
-                pt.x,
-                pt.y,
-                self.hwnd,
-                None,
-            )
-            .0 as usize;
-            let _ = PostMessageW(Some(self.hwnd), WM_NULL, WPARAM(0), LPARAM(0));
-            let _ = DestroyMenu(menu);
-
-            match cmd {
-                IDM_REFRESH => self.workers.iter().for_each(|w| w.refresh()),
-                IDM_AUTOSTART => {
-                    let on = !platform::starts_with_windows();
-                    if let Err(e) = platform::set_start_with_windows(on) {
-                        warn!("Start with Windows: {e:#}");
-                    }
-                }
-                IDM_LOGS => {
-                    let dir = HSTRING::from(crate::app_paths::logs_dir().as_os_str());
-                    ShellExecuteW(
-                        None,
-                        w!("open"),
-                        &dir,
-                        PCWSTR::null(),
-                        PCWSTR::null(),
-                        SW_SHOWNORMAL,
-                    );
-                }
-                IDM_QUIT => {
-                    let _ = PostMessageW(Some(self.hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
-                }
-                _ => {}
-            }
+            IDM_LOGS => unsafe {
+                let dir = HSTRING::from(crate::app_paths::logs_dir().as_os_str());
+                ShellExecuteW(
+                    None,
+                    w!("open"),
+                    &dir,
+                    PCWSTR::null(),
+                    PCWSTR::null(),
+                    SW_SHOWNORMAL,
+                );
+            },
+            IDM_QUIT => unsafe {
+                let _ = PostMessageW(Some(self.hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+            },
+            _ => {}
         }
+    }
+}
+
+/// Show the tray menu and return the chosen command (0 for none). Runs
+/// without any borrow of the app state; see the call site.
+fn show_menu(hwnd: HWND, status: &Status) -> usize {
+    let Ok(menu) = (unsafe { CreatePopupMenu() }) else { return 0 };
+    unsafe {
+        for (i, kind) in [Kind::Keyboard, Kind::Headset].into_iter().enumerate() {
+            let line = HSTRING::from(describe(kind, status));
+            let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 100 + i, &line);
+        }
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        let _ = AppendMenuW(menu, MF_STRING, IDM_REFRESH, w!("Read batteries now"));
+        let autostart = if platform::starts_with_windows() { MF_CHECKED } else { MF_STRING };
+        let _ = AppendMenuW(menu, MF_STRING | autostart, IDM_AUTOSTART, w!("Start with Windows"));
+        let _ = AppendMenuW(menu, MF_STRING, IDM_LOGS, w!("Open log folder"));
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        let _ = AppendMenuW(menu, MF_STRING, IDM_QUIT, w!("Quit"));
+
+        let mut pt = POINT::default();
+        let _ = GetCursorPos(&mut pt);
+        // Without this the menu does not close when you click elsewhere.
+        let _ = SetForegroundWindow(hwnd);
+        let cmd = TrackPopupMenuEx(
+            menu,
+            (TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY).0,
+            pt.x,
+            pt.y,
+            hwnd,
+            None,
+        )
+        .0 as usize;
+        let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
+        let _ = DestroyMenu(menu);
+        cmd
     }
 }
