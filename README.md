@@ -49,6 +49,8 @@ matters. Nothing is sent to a sleeping keyboard or a switched-off headset; the
 app waits for them to announce themselves. Two writes: turning on the
 receiver's connection notifications if a replug has turned them off (G HUB
 used to do this), and taking the headset's buttons over and back (below).
+Even with no buttons configured, the headset gets one hand-back the first
+time it is on, which undoes a takeover left behind by a killed run.
 
 Between those moments the app is idle: its main thread waits for Windows
 messages and each device's worker waits for that device, with no timers.
@@ -70,13 +72,19 @@ longer mutes by itself, and reports its mute button and boom to the PC
 instead. blu-ghub then mutes and unmutes the microphone in Windows (mute
 button: toggle; boom up: mute; boom down: unmute), and the headset and its
 LED follow, so Windows shows the real state, which it does not when the
-headset mutes by itself. If blu-ghub cannot find the microphone in Windows
-or cannot read the mute button, it does not take the buttons over at all, and
-if it crashes it hands them back on the way out. Right after a takeover the
-first press of the mute button may seem to do nothing, if the headset was
-muted by itself before (Windows did not know): press again. Do not run
-blu-ghub with buttons configured and G HUB at the same time: both would act
-on each press.
+headset mutes by itself. If blu-ghub cannot find the headset's microphone
+in Windows (or cannot tell it from another), or cannot read the mute button,
+it does not take the buttons over at all. If it crashes it hands them back on
+the way out; if it is killed, it hands them back when next started.
+Switching the headset off also ends a takeover.
+
+After each takeover, the first press of the mute button always mutes: until
+then Windows' idea of the mute may be stale either way, as the headset may
+have muted or unmuted by itself. Press again to unmute.
+
+While G HUB's agent runs, blu-ghub leaves the headset's buttons and mute to
+it, configured or not, until the headset is next switched on (or the
+batteries are read, or the PC resumes).
 
 The actions are sent as media keys, so the media player or the volume of the
 default output reacts as to a keyboard's media keys. Windows drops them

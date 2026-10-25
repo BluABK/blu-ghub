@@ -1,14 +1,18 @@
 //! blu-ghub: a small replacement for Logitech G HUB, for one G915 keyboard
 //! (on its LIGHTSPEED receiver or its cable) and one G935 headset.
 //!
-//! - [`app`]: the tray app (BluGHub.exe). Battery levels so far, read with
-//!   HID++ requests only when a device connects or wakes, when asked, and as a
-//!   30-minute fallback while it is awake; the only write is turning on the
-//!   receiver's own connection notifications.
+//! - [`app`]: the tray app (BluGHub.exe). Battery levels, read with HID++
+//!   requests only when a device connects or wakes, when asked, and as a
+//!   30-minute fallback while it is awake. If configured, the G935's G1-G3
+//!   as media keys, and with them its microphone mute ([`audio`]). Writes:
+//!   the receiver's own connection notifications, and taking the headset's
+//!   buttons over and back.
 //! - [`diag`]: BluGHub-diag. `caps` reads HID descriptors through handles
-//!   opened with no access rights, `sniff` opens the HID++ collections
-//!   read-only, `keys` watches keyboard input through Raw Input (no hook), and
-//!   `probe`/`dump-onboard` send read requests only.
+//!   opened with no access rights, `sniff` opens the HID++ collections (and
+//!   with `--headset-all` the headset's others) read-only, `keys` watches
+//!   keyboard input through Raw Input (no hook), `probe`/`dump-onboard` send
+//!   read requests only, and three commands write the keyboard's on-board
+//!   G-keys.
 
 #[cfg(not(windows))]
 compile_error!("blu-ghub talks to the Windows HID stack and only builds on Windows");

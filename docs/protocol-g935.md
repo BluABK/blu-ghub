@@ -73,9 +73,19 @@ Not diverted, the headset mutes by itself and lights the LED, and the PC
 sees only an empty consumer report (`01 00 00 00 00`) per action: Windows'
 mute setting does not change and shows a stale state.
 
-Not yet verified: whether switching the headset off and on ends a
-diversion. blu-ghub re-diverts at every power-on, and a run that sees the
-buttons diverted when it does not want them hands them back.
+Switching the headset off ends a diversion (verified: diverted, switched
+off, switched on with nothing running: the mute button worked by itself
+again). A request to a headset that is off is answered by the dongle with
+HID++ 2.0 error 05 "not allowed". blu-ghub re-diverts at every power-on, and
+a run that sees the buttons diverted when it does not want them hands them
+back.
+
+Windows' mute can be stale in either direction when a diversion starts, as
+the headset may have muted or unmuted by itself before; and Windows passes
+on only a change of its own state. blu-ghub therefore forces an unmute
+through (mute, then unmute) and makes the first mute-button press after a
+takeover a mute (forced the same way); a plain mute (the boom raised) is
+never forced, as the headset has already muted itself.
 
 ## Sidetone 0x8300 and equaliser 0x8310
 

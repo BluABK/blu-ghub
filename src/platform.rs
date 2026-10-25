@@ -29,6 +29,33 @@ fn start_menu_shortcut_path() -> Option<PathBuf> {
 /// Create or overwrite the Start Menu shortcut so it points at the running
 /// exe. Rewritten on every launch: a shortcut left pointing at a moved or
 /// renamed build fails silently from the Start Menu.
+/// Whether G HUB's agent is running. It takes the headset's buttons and
+/// answers its mute button itself, so blu-ghub keeps out of its way.
+pub fn ghub_running() -> bool {
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+        TH32CS_SNAPPROCESS,
+    };
+    let Ok(snapshot) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }) else {
+        return false;
+    };
+    let snapshot = crate::hid::OwnedHandle(snapshot);
+    let mut entry = PROCESSENTRY32W {
+        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
+    let mut more = unsafe { Process32FirstW(snapshot.0, &mut entry) }.is_ok();
+    while more {
+        let name = &entry.szExeFile;
+        let end = name.iter().position(|&c| c == 0).unwrap_or(name.len());
+        if String::from_utf16_lossy(&name[..end]).eq_ignore_ascii_case("lghub_agent.exe") {
+            return true;
+        }
+        more = unsafe { Process32NextW(snapshot.0, &mut entry) }.is_ok();
+    }
+    false
+}
+
 pub fn create_start_menu_shortcut() -> Result<PathBuf> {
     use windows::Win32::System::Com::{
         CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,

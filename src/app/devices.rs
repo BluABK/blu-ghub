@@ -287,10 +287,7 @@ pub fn start(
             info!("{}: worker started (device index {dev:#04x})", link.label());
             match link {
                 Link::KeyboardReceiver | Link::KeyboardCable => keyboard(ch, link, dev, &rep, poll),
-                Link::Headset => {
-                    headset(ch, &rep, poll, buttons, mic.unwrap_or_default());
-                    *taken() = None;
-                }
+                Link::Headset => headset(ch, &rep, poll, buttons, mic.unwrap_or_default()),
             }
             rep.update(link, |s| s.state = State::Absent);
             info!("{}: worker stopped", link.label());
@@ -486,6 +483,29 @@ fn mic_request(bits: u8) -> Option<MicRequest> {
     }
 }
 
+/// What blu-ghub does to the microphone in Windows for a request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MicAction {
+    Toggle,
+    /// Mute even if Windows believes it already is ([`Mic::mute_surely`]).
+    MuteSurely,
+    /// A plain mute, never forced.
+    Mute,
+    /// Unmute even if Windows believes it already is ([`Mic::unmute`]).
+    Unmute,
+}
+
+/// `unsure`: no mute has gone through since the takeover, so Windows'
+/// state may be stale either way.
+fn mic_action(req: MicRequest, unsure: bool) -> MicAction {
+    match req {
+        MicRequest::Toggle if unsure => MicAction::MuteSurely,
+        MicRequest::Toggle => MicAction::Toggle,
+        MicRequest::Mute => MicAction::Mute,
+        MicRequest::Unmute => MicAction::Unmute,
+    }
+}
+
 /// What a report from the headset means.
 #[derive(Debug, PartialEq)]
 enum Route {
@@ -529,6 +549,17 @@ fn taken() -> std::sync::MutexGuard<'static, Option<(isize, u8)>> {
     TAKEN.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Empties [`TAKEN`] when the headset worker ends, however it ends, and
+/// before its channel closes the handle (a function's locals are dropped
+/// before its parameters).
+struct ClearTaken;
+
+impl Drop for ClearTaken {
+    fn drop(&mut self) {
+        *taken() = None;
+    }
+}
+
 /// For the panic hook: a release build aborts on panic, which would leave
 /// the headset's buttons, mute button and boom with nobody to act on them,
 /// so the microphone could not be unmuted. One write, no reply awaited.
@@ -562,9 +593,15 @@ struct Buttons {
     failed: bool,
     retry: Option<Instant>,
     retries: u8,
-    /// The hand-back that undoes a takeover left by a crashed or killed
-    /// run has been sent (once a run, while blu-ghub is not taking over).
+    /// The hand-back that undoes a takeover left by a killed run went
+    /// through (needed once a run, while blu-ghub is not taking over), and
+    /// whether it has been tried this power-on.
     cleared: bool,
+    clear_tried: bool,
+    /// Since the takeover no mute has gone through, so Windows' state may
+    /// be stale in either direction: the first press of the mute button
+    /// mutes, whatever Windows believes.
+    unsure: bool,
     /// Which G-keys were down in the last report.
     held: u8,
     /// Windows refused the last key: warn once, not at every press.
@@ -585,6 +622,8 @@ impl Buttons {
             retry: None,
             retries: 0,
             cleared: false,
+            clear_tried: false,
+            unsure: false,
             held: 0,
             refused: false,
         }
@@ -596,8 +635,10 @@ impl Buttons {
     }
 
     /// Reports from the buttons are blu-ghub's to act on: it has them, or
-    /// wants them and has not failed to take them (a takeover whose reply
-    /// timed out may still have been applied).
+    /// wants them and has not failed to take them (it took the headset for
+    /// switched off after a battery read failed, while it stayed on with
+    /// its buttons taken). After a failed takeover, reports mean the request
+    /// was applied after all, and they are handed back.
     fn ours(&self) -> bool {
         self.diverted || (self.wanted() && !self.failed)
     }
@@ -635,6 +676,15 @@ impl Buttons {
         if self.diverted || self.failed {
             return;
         }
+        if !self.wanted() && (self.cleared || self.clear_tried) {
+            return;
+        }
+        if crate::platform::ghub_running() {
+            // Until the next power-on, refresh or resume.
+            info!("G935: G HUB is running; leaving the headset's buttons and mute to it");
+            self.failed = true;
+            return;
+        }
         if self.wanted() {
             match self.take(ch, dev) {
                 Ok(()) => return,
@@ -653,11 +703,14 @@ impl Buttons {
                 }
             }
         }
-        if !self.cleared {
-            self.cleared = true;
+        if !self.cleared && !self.clear_tried {
+            self.clear_tried = true;
             match self.hand_back(ch, dev) {
-                Ok(()) => debug!("G935: the buttons are the headset's"),
-                Err(e) => debug!("G935: could not make sure the headset has its buttons: {e:#}"),
+                Ok(()) => {
+                    self.cleared = true;
+                    debug!("G935: the buttons are the headset's");
+                }
+                Err(e) => warn!("G935: could not make sure the headset has its buttons: {e:#}"),
             }
         }
     }
@@ -674,6 +727,7 @@ impl Buttons {
         self.attempted = true;
         ch.request(dev, feat, 2, &[0x01])?;
         self.diverted = true;
+        self.unsure = true;
         self.held = 0;
         *taken() = Some((ch.raw_long_handle(), feat));
         info!(
@@ -690,6 +744,7 @@ impl Buttons {
         if let (false, Some(feat)) = (self.diverted, self.feat) {
             info!("G935: the buttons were taken over after all");
             self.diverted = true;
+            self.unsure = true;
             *taken() = Some((ch.raw_long_handle(), feat));
         }
     }
@@ -703,20 +758,33 @@ impl Buttons {
         Ok(())
     }
 
-    /// On quit.
+    /// On quit. Not while G HUB runs: it will have taken them itself.
     fn release(&mut self, ch: &mut Channel, dev: u8) {
-        if self.attempted || self.diverted {
-            match self.hand_back(ch, dev) {
-                Ok(()) => info!("G935: buttons handed back"),
-                Err(e) => warn!("G935: could not hand the buttons back: {e:#}"),
+        let owed = self.attempted || self.diverted || (self.clear_tried && !self.cleared);
+        if !owed {
+            return;
+        }
+        if crate::platform::ghub_running() {
+            info!("G935: G HUB is running; leaving the buttons to it");
+            return;
+        }
+        match self.hand_back(ch, dev) {
+            Ok(()) => info!("G935: buttons handed back"),
+            // The dongle's answer while the headset is off, which has
+            // already ended the takeover.
+            Err(e) if matches!(e.downcast_ref(), Some(HidppError::Error20(0x05))) => {
+                debug!("G935: the headset is off; nothing to hand back")
             }
+            Err(e) => warn!("G935: could not hand the buttons back: {e:#}"),
         }
     }
 
-    /// The headset switched off, which ends the takeover.
+    /// The headset switched off, which ends the takeover (verified); it is
+    /// taken again at the next power-on.
     fn forget(&mut self) {
         self.diverted = false;
         self.failed = false;
+        self.clear_tried = false;
         self.retry = None;
         self.retries = 0;
         self.held = 0;
@@ -729,6 +797,7 @@ impl Buttons {
     fn invalidate(&mut self) {
         self.diverted = false;
         self.failed = false;
+        self.clear_tried = false;
         self.retry = None;
         self.retries = 0;
     }
@@ -762,23 +831,28 @@ impl Buttons {
     /// The mute button or the boom: mute or unmute the microphone in
     /// Windows. Returns whether it is now muted.
     fn on_mic(&mut self, req: MicRequest) -> anyhow::Result<bool> {
-        match self.apply_mic(req) {
-            Ok(muted) => Ok(muted),
+        let muted = match self.apply_mic(req) {
+            Ok(muted) => muted,
             // Its endpoint may be stale (the dongle replugged, the device
             // switched off in Windows): look it up again, once.
             Err(_) => {
                 self.mic = None;
-                self.apply_mic(req)
+                self.apply_mic(req)?
             }
-        }
+        };
+        // Windows and the headset now agree.
+        self.unsure = false;
+        Ok(muted)
     }
 
     fn apply_mic(&mut self, req: MicRequest) -> anyhow::Result<bool> {
+        let action = mic_action(req, self.unsure);
         let mic = self.mic()?;
-        match req {
-            MicRequest::Toggle => mic.toggle(),
-            MicRequest::Mute => mic.set(true).map(|()| true),
-            MicRequest::Unmute => mic.unmute().map(|()| false),
+        match action {
+            MicAction::Toggle => mic.toggle(),
+            MicAction::MuteSurely => mic.mute_surely().map(|()| true),
+            MicAction::Mute => mic.set(true).map(|()| true),
+            MicAction::Unmute => mic.unmute().map(|()| false),
         }
     }
 }
@@ -792,6 +866,7 @@ fn headset(
 ) {
     let link = Link::Headset;
     let dev = RECEIVER;
+    let _taken = ClearTaken;
     rep.update(link, |s| s.state = State::Sleeping);
     let _com = Com::init().map_err(|e| warn!("G935: COM: {e:#}")).ok();
     let listening = match &setup.telephony {
@@ -903,6 +978,11 @@ fn headset(
                 need_read = true;
             }
             Ok(Some(Event::Report(r))) => match route(&r.data, dev, buttons.feat, adc_idx) {
+                // G HUB took the buttons and answers them itself.
+                Route::Keys(_) | Route::Mic(_) if crate::platform::ghub_running() => {
+                    debug!("G935: G HUB is running; leaving the report to it");
+                    need_read |= !on;
+                }
                 Route::Keys(mask) => {
                     if buttons.ours() {
                         buttons.adopt(&ch);
@@ -913,7 +993,9 @@ fn headset(
                         // Taken by a run that crashed, or after a reply that
                         // timed out, while blu-ghub cannot act on the mute.
                         info!("G935: buttons held by nobody; handing them back");
-                        let _ = buttons.hand_back(&mut ch, dev);
+                        if let Err(e) = buttons.hand_back(&mut ch, dev) {
+                            warn!("G935: could not hand the buttons back: {e:#}");
+                        }
                     }
                     need_read |= !on;
                 }
@@ -933,8 +1015,10 @@ fn headset(
                             false
                         }
                     };
-                    if !acted || !buttons.ours() {
-                        let _ = buttons.hand_back(&mut ch, dev);
+                    if (!acted || !buttons.ours())
+                        && let Err(e) = buttons.hand_back(&mut ch, dev)
+                    {
+                        warn!("G935: could not hand the buttons back: {e:#}");
                     }
                     need_read |= !on;
                 }
@@ -1040,6 +1124,16 @@ mod tests {
         assert_eq!(mic_request(BOOM_DOWN), Some(MicRequest::Unmute));
         // Hook Switch, which the G935 has no use for.
         assert_eq!(mic_request(0x02), None);
+    }
+
+    #[test]
+    fn the_first_mute_press_after_a_takeover_mutes_and_the_boom_never_forces_a_mute() {
+        assert_eq!(mic_action(MicRequest::Toggle, true), MicAction::MuteSurely);
+        assert_eq!(mic_action(MicRequest::Toggle, false), MicAction::Toggle);
+        for unsure in [true, false] {
+            assert_eq!(mic_action(MicRequest::Mute, unsure), MicAction::Mute);
+            assert_eq!(mic_action(MicRequest::Unmute, unsure), MicAction::Unmute);
+        }
     }
 
     fn long(bytes: &[u8]) -> Vec<u8> {
