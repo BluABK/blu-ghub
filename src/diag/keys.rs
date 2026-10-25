@@ -125,6 +125,8 @@ struct DevStats {
     late_up_text: u64,
     chatter: u64,
     orphan_releases: u64,
+    /// Releases without a press while a modifier was held: hotkeys.
+    hotkey_releases: u64,
     missed_releases: u64,
     longest_text_hold_us: u64,
     arrivals: u64,
@@ -534,16 +536,32 @@ impl Logger {
     }
 
     fn on_release(&mut self, dev: usize, key: ScanCode, t: u64, late: bool) -> &'static str {
+        // A release of a key whose press never arrived. Usually another
+        // program's global hotkey (RegisterHotKey): Windows hands the hotkey's
+        // key-down to that program instead of to Raw Input, but lets the
+        // key-up through. Those come with a modifier held; without one, the
+        // press was really lost.
+        let modifier_held = self.keys.iter().any(|((d, k), s)| {
+            *d == dev && s.down && matches!(k.name(), Some(n) if is_modifier(n))
+        });
         let state = self.keys.entry((dev, key)).or_default();
         if !state.down {
             state.last_up = Some((t, late));
             if t > WARMUP_US {
-                self.stats[dev].orphan_releases += 1;
                 let label = self.anon.label(key);
-                self.out.line(format!(
-                    "{} ORPHAN RELEASE  dev {dev}: {label} released without a press",
-                    now_stamp()
-                ));
+                if modifier_held {
+                    self.stats[dev].hotkey_releases += 1;
+                    self.out.file_only(format!(
+                        "{} hotkey?         dev {dev}: {label} released without a press while a                          modifier was held (another program's global hotkey takes the press)",
+                        now_stamp()
+                    ));
+                } else {
+                    self.stats[dev].orphan_releases += 1;
+                    self.out.line(format!(
+                        "{} ORPHAN RELEASE  dev {dev}: {label} released without a press",
+                        now_stamp()
+                    ));
+                }
             }
             return "up (never seen down)";
         }
@@ -800,12 +818,13 @@ impl Logger {
                 s.longest_text_hold_us as f64 / 1e6
             ));
             self.out.line(format!(
-                "    auto-repeat runs: text {} other {}  | chatter {}  | orphan releases {}  | \
-                 missed releases {}  | device arrivals {} removals {}",
+                "    auto-repeat runs: text {} other {}  | chatter {}  | orphan releases {} \
+                 (+{} under a hotkey)  | missed releases {}  | device arrivals {} removals {}",
                 s.text_repeat_runs,
                 s.other_repeat_runs,
                 s.chatter,
                 s.orphan_releases,
+                s.hotkey_releases,
                 s.missed_releases,
                 s.arrivals,
                 s.removals
@@ -833,6 +852,10 @@ impl Logger {
         self.out.line(format!("Written to {}", self.out.path.display()));
         self.out.close();
     }
+}
+
+fn is_modifier(name: &str) -> bool {
+    matches!(name, "LCtrl" | "RCtrl" | "LShift" | "RShift" | "LAlt" | "AltGr" | "LWin" | "RWin")
 }
 
 /// Events within this distance of an auto-repeating key's press or release
@@ -1097,6 +1120,25 @@ mod tests {
         l.on_key(0, A, 0, true, T0 + 1_200 * MS, true);
         l.on_key(0, B, 0, false, T0 + 1_200 * MS + 10, true);
         assert_eq!(l.stats[0].lost_up_text, 0);
+    }
+
+    #[test]
+    fn a_hotkey_whose_press_another_program_took_is_not_an_orphan_release() {
+        const LCTRL: ScanCode = ScanCode { code: 0x1D, e0: false, e1: false };
+        const LSHIFT: ScanCode = ScanCode { code: 0x2A, e0: false, e1: false };
+        const ONE: ScanCode = ScanCode { code: 0x02, e0: false, e1: false };
+        let mut l = logger();
+        down(&mut l, LCTRL, 0);
+        down(&mut l, LSHIFT, 30 * MS);
+        // The "1" press went to the hotkey's owner; only its release arrives.
+        up(&mut l, ONE, 120 * MS);
+        up(&mut l, LSHIFT, 150 * MS);
+        up(&mut l, LCTRL, 160 * MS);
+        assert_eq!(l.stats[0].hotkey_releases, 1);
+        assert_eq!(l.stats[0].orphan_releases, 0);
+        // Without a modifier held it is a real orphan.
+        up(&mut l, ONE, 400 * MS);
+        assert_eq!(l.stats[0].orphan_releases, 1);
     }
 
     #[test]
