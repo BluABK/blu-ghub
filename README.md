@@ -114,6 +114,11 @@ low_battery_percent = 20     # 0 = no warning
 battery_check_minutes = 60   # the fallback reading, 5-1440
 log_retention_days = 14
 
+[keyboard.lighting.keys]      # usually imported from G HUB, see below
+esc = "#2a6fd4"
+f1 = "#d42a8c"
+logo = "#2a6fd4"
+
 [headset.buttons]
 g1 = "previous_track"
 g2 = "next_track"
@@ -128,6 +133,15 @@ brightness = 60              # 1-100 (steady: the colour is dimmed)
 [headset.lighting.logo]
 effect = "off"
 ```
+
+**Keyboard lighting.** The G915 plays a layout stored in itself, and
+blu-ghub leaves it so. `[keyboard.lighting.keys]` is blu-ghub's own copy of
+a layout, for the layout editor to come; nothing sends it to the keyboard
+yet. The settings window fills it from G HUB: *Read G HUB's layouts…* reads
+a copy of `%LOCALAPPDATA%\LGHUB\settings.db` (never the file itself), and
+*Import* takes the one picked. Key names follow the key's position on a US
+layout (`semicolon` is Ø on a Nordic board); the full list is in
+`src/keymap.rs`.
 
 **Headset lighting.** A zone with no `[headset.lighting.*]` section is never
 written and shows whatever the headset does by itself. A configured one is
@@ -166,6 +180,7 @@ and work with nothing installed. These commands change them:
 | `BluGHub-diag set-gkeys 2 G3=F15 G5=LCtrl G1=off` | Sets G-keys in profile 2 (M2). Keys: `F1`-`F24`, `LCtrl` `LShift` `LAlt` `LWin` (and `R...`), `off`, or `usage:0xNN`. |
 | `BluGHub-diag write-test 2` | Writes profile 2 back unchanged, to prove the write path. |
 | `BluGHub-diag restore-sector 2 FILE` | Puts a saved copy of a profile back. |
+| `BluGHub-diag slots` | Reads what the keyboard's stored-lighting slots hold: whether each is in use, its length, and the id and name G HUB gave it. Read requests only. |
 | `BluGHub-diag light-test [--claim]` | Paints Escape red over the keyboard's stored lighting, in its memory only (nothing stored; a power cycle undoes it). `--claim` takes the lighting from the keyboard's own effects first, and hands it back on Enter. |
 | `BluGHub-diag keys --echo` | Prints each press of a non-text key (F-keys, modifiers, ...) to check the result. |
 

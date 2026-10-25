@@ -107,7 +107,26 @@ get): idle 60 s, sleep 300 s.
 
 **Stored.** The per-key layout survives a power-cycle: the keys cluster runs
 the on-board *custom* effect (0x000C), whose per-key data lives outside the
-profile sectors below.
+profile sectors below, in one of two slots (Brightness + 8 and + 9 on the
+keyboard pick them). A profile's lighting entry only names the slot.
+
+Slot info is fn0 getInfo `[FF, 00, 01, slot, kind]`, addressed as G HUB does
+("all clusters", effect 0; the spec's `[cluster, effect index, 01, ...]`
+answers error 02 on this unit). The reply's data starts at byte 5:
+
+| kind | Data |
+|---|---|
+| 0 | state: valid, length in frames (2) |
+| 1 | defaults: start frame (2), length (2), ms a frame (2), intensity |
+| 2, 3 | the 16-byte UUID: bytes 0-10, then 11-15 |
+| 4, 5, 6 | the name, 32 bytes: 0-10, 11-21, 22-31, NUL-padded |
+
+A slot not in use answers error 02. On this unit both slots hold a one-frame
+layout at 32 ms a frame, intensity 100. G HUB names a slot after the preset
+it stored there, under a UUID of its own (the same preset stored twice got
+two). Its profile card says `"slot": 1` where the profile entry has slot 0,
+so G HUB presumably counts from 1. The colours themselves
+cannot be read back: 0x8081 has no get function (`BluGHub-diag slots`).
 
 ## On-board profiles: 0x8100
 

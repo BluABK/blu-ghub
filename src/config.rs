@@ -17,7 +17,23 @@ use crate::input::ButtonAction;
 #[serde(default)]
 pub struct Config {
     pub settings: Settings,
+    pub keyboard: Keyboard,
     pub headset: Headset,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Keyboard {
+    pub lighting: KeyboardLighting,
+}
+
+/// A per-key layout for the G915, by key name ([`crate::keymap`]). Kept for
+/// the layout editor; nothing sends it to the keyboard yet, which shows the
+/// layout stored in it.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct KeyboardLighting {
+    pub keys: std::collections::BTreeMap<String, crate::lighting::Rgb>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -82,6 +98,13 @@ impl Config {
             clamp("low_battery_percent", s.low_battery_percent as u64, 0, 100) as u8;
         s.battery_check_minutes = clamp("battery_check_minutes", s.battery_check_minutes, 5, 1440);
         s.log_retention_days = clamp("log_retention_days", s.log_retention_days, 1, 3650);
+        self.keyboard.lighting.keys.retain(|name, _| {
+            let known = crate::keymap::by_name(name).is_some();
+            if !known {
+                tracing::warn!("config: keyboard.lighting.keys: no key called {name:?}; left out");
+            }
+            known
+        });
         let l = &mut self.headset.lighting;
         l.sides = l.sides.map(|z| z.sanitized());
         l.logo = l.logo.map(|z| z.sanitized());
@@ -183,7 +206,21 @@ mod tests {
 
     #[test]
     fn the_default_config_carries_no_colours_macros_or_overrides() {
-        assert_eq!(Config::default().headset.buttons.as_array(), [ButtonAction::Default; 3]);
+        let c = Config::default();
+        assert_eq!(c.headset.buttons.as_array(), [ButtonAction::Default; 3]);
+        assert!(c.keyboard.lighting.keys.is_empty());
+        assert_eq!(c.headset.lighting, Default::default());
+    }
+
+    #[test]
+    fn key_colours_read_and_unknown_keys_are_left_out() {
+        let c: Config = toml::from_str(
+            "[keyboard.lighting.keys]\nesc = \"#102030\"\nnot_a_key = \"#405060\"\n",
+        )
+        .unwrap();
+        let keys = c.sanitized().keyboard.lighting.keys;
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys["esc"].to_string(), "#102030");
     }
 
     #[test]

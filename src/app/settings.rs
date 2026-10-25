@@ -28,6 +28,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use super::devices::{Device, Shared, State, Status};
 use crate::config::Config;
+use crate::ghub_import;
 use crate::input::ButtonAction;
 use crate::lighting::{Effect, Rgb, ZoneLight};
 use crate::platform;
@@ -161,7 +162,7 @@ pub fn run(editing: Editing, auto_close: Option<Duration>) -> Result<bool> {
         wgpu_options: wgpu_options(),
         viewport: egui::ViewportBuilder::default()
             .with_title("BluGHub")
-            .with_inner_size([520.0, 600.0])
+            .with_inner_size([520.0, 680.0])
             .with_min_inner_size([400.0, 300.0])
             // An empty icon turns eframe's icon handling off; see above.
             .with_icon(egui::IconData::default())
@@ -225,6 +226,9 @@ struct Settings {
     note: Option<(String, bool)>,
     /// The lighting zones' colours as typed (sides, logo).
     hex: [String; 2],
+    /// G HUB's per-key presets once read, and the one picked.
+    ghub: Option<Result<GHub, String>>,
+    ghub_pick: usize,
     opened: Instant,
     auto_close: Option<Duration>,
     /// Passes of `logic` and painted frames, logged on close: an idle window
@@ -247,6 +251,8 @@ impl Settings {
             autostart: platform::starts_with_windows(),
             note: None,
             hex: Default::default(),
+            ghub: None,
+            ghub_pick: 0,
             opened: Instant::now(),
             auto_close,
             passes: 0,
@@ -314,6 +320,8 @@ impl eframe::App for Settings {
                     }
                 });
                 ui.add_space(12.0);
+                self.keyboard_lighting(ui);
+                ui.add_space(12.0);
                 self.headset_buttons(ui);
                 ui.add_space(12.0);
                 self.headset_lighting(ui);
@@ -326,7 +334,90 @@ impl eframe::App for Settings {
     }
 }
 
+/// G HUB's settings as read, and its per-key presets.
+struct GHub {
+    doc: serde_json::Value,
+    presets: Vec<ghub_import::Preset>,
+}
+
 impl Settings {
+    fn keyboard_lighting(&mut self, ui: &mut egui::Ui) {
+        ui.heading("G915 lighting");
+        ui.add_space(4.0);
+        let keys = self.draft.keyboard.lighting.keys.len();
+        ui.label(if keys == 0 {
+            "No layout of blu-ghub's own yet.".to_owned()
+        } else {
+            format!("A layout of {keys} keys, kept for the layout editor.")
+        });
+        ui.label(
+            egui::RichText::new(
+                "The keyboard shows the layout stored in it; blu-ghub does not change it.",
+            )
+            .weak(),
+        );
+        ui.add_space(4.0);
+        match &self.ghub {
+            None => {
+                if ui
+                    .button("Read G HUB's layouts…")
+                    .on_hover_text(
+                        "Reads a copy of G HUB's settings; G HUB's own file is left as it is.",
+                    )
+                    .clicked()
+                {
+                    self.ghub = Some(read_ghub());
+                    self.ghub_pick = 0;
+                }
+            }
+            Some(Err(e)) => {
+                ui.label(egui::RichText::new(e).color(ui.visuals().error_fg_color));
+            }
+            Some(Ok(g)) if g.presets.is_empty() => {
+                ui.label("G HUB has no per-key layouts.");
+            }
+            Some(Ok(g)) => {
+                let mut import = None;
+                ui.horizontal(|ui| {
+                    let pick = &mut self.ghub_pick;
+                    egui::ComboBox::from_id_salt("ghub-preset")
+                        .selected_text(g.presets.get(*pick).map_or("", |p| p.name.as_str()))
+                        .width(200.0)
+                        .show_ui(ui, |ui| {
+                            for (i, p) in g.presets.iter().enumerate() {
+                                ui.selectable_value(pick, i, &p.name);
+                            }
+                        });
+                    if ui.button("Import").clicked() {
+                        import = g.presets.get(*pick).map(|p| (p.name.clone(), p.id.clone()));
+                    }
+                });
+                if let Some((name, id)) = import {
+                    self.note = Some(match ghub_import::layout(&g.doc, &id) {
+                        Ok(l) => {
+                            if !l.skipped.is_empty() {
+                                tracing::info!("G HUB import of {id}: skipped {:?}", l.skipped);
+                            }
+                            let n = l.keys.len();
+                            self.draft.keyboard.lighting.keys = l.keys;
+                            let skipped = match l.skipped.len() {
+                                0 => String::new(),
+                                s => format!(" ({s} entries without a G915 key left out)"),
+                            };
+                            (
+                                format!(
+                                    "Imported {n} keys from \"{name}\"{skipped}; Save keeps them."
+                                ),
+                                false,
+                            )
+                        }
+                        Err(e) => (format!("Import: {e:#}"), true),
+                    });
+                }
+            }
+        }
+    }
+
     fn headset_buttons(&mut self, ui: &mut egui::Ui) {
         ui.heading("G935 buttons");
         ui.add_space(4.0);
@@ -465,6 +556,16 @@ impl Settings {
             Err(e) => self.note = Some((format!("Not saved: {e:#}"), true)),
         }
     }
+}
+
+fn read_ghub() -> Result<GHub, String> {
+    let path = ghub_import::settings_path().ok_or("LOCALAPPDATA is not set")?;
+    if !path.exists() {
+        return Err(format!("G HUB's settings are not at {}", path.display()));
+    }
+    let doc = ghub_import::read(&path).map_err(|e| format!("{e:#}"))?;
+    let presets = ghub_import::presets(&doc);
+    Ok(GHub { doc, presets })
 }
 
 /// One zone: left to the headset, or an effect with its colour, speed

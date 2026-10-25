@@ -5,15 +5,16 @@
 //!   BluGHub-diag sniff [--minutes N] [--headset-all]  passive capture of HID++ traffic
 //!   BluGHub-diag probe                what the devices are and support (read requests)
 //!   BluGHub-diag dump-onboard         back up the keyboard's on-board memory (reads)
+//!   BluGHub-diag slots                the keyboard's stored-lighting slots (reads)
 //!
-//! caps, keys and sniff send nothing to a device; probe and dump-onboard send
+//! caps, keys and sniff send nothing to a device; probe, dump-onboard and slots send
 //! HID++ read requests only. Output also goes to %APPDATA%\BluGHub\diag\.
 
 use anyhow::{Result, bail};
 
 fn usage() -> &'static str {
     "usage:\n  BluGHub-diag caps\n  BluGHub-diag keys  [--minutes N] [--echo]\n  BluGHub-diag sniff [--minutes N] [--headset-all]\n  \
-     BluGHub-diag probe\n  BluGHub-diag dump-onboard\n\n\
+     BluGHub-diag probe\n  BluGHub-diag dump-onboard\n  BluGHub-diag slots\n\n\
      Writing the keyboard's on-board memory (each saves a backup first and\n\
      verifies the result):\n  \
      BluGHub-diag write-test SECTOR          write a profile back unchanged\n  \
@@ -21,7 +22,7 @@ fn usage() -> &'static str {
      BluGHub-diag restore-sector SECTOR FILE put a saved sector back\n\n\
      Lighting (nothing stored; a power cycle undoes it):\n  \
      BluGHub-diag light-test [--claim]       paint Escape red over the stored layout\n\n\
-     caps, keys and sniff send nothing to any device; probe and dump-onboard send\n\
+     caps, keys and sniff send nothing to any device; probe, dump-onboard and slots send\n\
      read requests only; only the three commands above write. Logs go to %APPDATA%\\BluGHub\\diag\\."
 }
 
@@ -72,6 +73,7 @@ fn main() -> Result<()> {
         ["keys"] => blu_ghub::diag::keys::run(minutes, echo),
         ["sniff"] => blu_ghub::diag::sniff::run(minutes, headset_all),
         ["light-test"] => blu_ghub::diag::light::run(claim),
+        ["slots"] => blu_ghub::diag::slots::run(),
         _ => bail!("{}", usage()),
     }
 }

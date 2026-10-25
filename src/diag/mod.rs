@@ -8,6 +8,7 @@ pub mod keys;
 pub mod light;
 pub mod onboard;
 pub mod probe;
+pub mod slots;
 pub mod sniff;
 
 use std::fs::{File, OpenOptions};
