@@ -361,6 +361,21 @@ impl Channel {
         Ok(ch)
     }
 
+    /// Also read `info`, a collection of the same device that is not HID++,
+    /// opened read-only: its reports arrive through [`Channel::wait_event`]
+    /// with the rest. Their report ids never look like HID++ replies.
+    pub fn listen(&mut self, info: &HidInfo) -> Result<()> {
+        let handle = std::sync::Arc::new(hid::open_read(&info.path)?);
+        let n = self.readers.len();
+        self.spawn_reader(n, handle, info.input_len as usize)
+    }
+
+    /// The long collection's handle, for a last-resort write from a panic
+    /// hook. Valid for as long as the channel lives.
+    pub fn raw_long_handle(&self) -> isize {
+        self.long.handle.0.0 as isize
+    }
+
     fn spawn_reader(
         &mut self,
         n: usize,
@@ -644,6 +659,13 @@ pub fn hidpp_groups(all: &[HidInfo], pid: u16) -> Vec<Vec<&HidInfo>> {
 fn instance_key(path: &str) -> String {
     let inst = path.split('#').nth(2).unwrap_or(path);
     inst.rsplit_once('&').map(|(k, _)| k).unwrap_or(inst).to_ascii_lowercase()
+}
+
+/// Another collection of the same USB interface as `path` (the headset's
+/// telephony collection beside its HID++ one, say), by usage page.
+pub fn sibling<'a>(all: &'a [HidInfo], path: &str, usage_page: u16) -> Option<&'a HidInfo> {
+    let key = instance_key(path);
+    all.iter().find(|i| i.usage_page == usage_page && instance_key(&i.path) == key)
 }
 
 /// The first device's HID++ collections, for tools that expect one.

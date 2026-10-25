@@ -9,10 +9,41 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::input::ButtonAction;
+
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub settings: Settings,
+    pub headset: Headset,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Headset {
+    pub buttons: HeadsetButtons,
+}
+
+/// What the G935's G1-G3 do while blu-ghub runs. By default nothing is
+/// taken over: the buttons do what the headset's own firmware does with
+/// them, and the headset handles its microphone mute by itself.
+///
+/// Setting any button takes all three over (the headset hands over all or
+/// none), and with them the mute button and the boom, which blu-ghub then
+/// turns into muting the microphone in Windows. A button left at `default`
+/// then does nothing.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HeadsetButtons {
+    pub g1: ButtonAction,
+    pub g2: ButtonAction,
+    pub g3: ButtonAction,
+}
+
+impl HeadsetButtons {
+    pub fn as_array(&self) -> [ButtonAction; 3] {
+        [self.g1, self.g2, self.g3]
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -91,6 +122,43 @@ mod tests {
             (s.low_battery_percent, s.battery_check_minutes, s.log_retention_days),
             (100, 5, 1)
         );
+    }
+
+    #[test]
+    fn headset_buttons_read_from_the_file() {
+        let c: Config =
+            toml::from_str("[headset.buttons]\ng1 = \"next_track\"\ng3 = \"disabled\"\n").unwrap();
+        assert_eq!(c.headset.buttons.g1, ButtonAction::NextTrack);
+        assert_eq!(c.headset.buttons.g2, ButtonAction::Default);
+        assert_eq!(c.headset.buttons.g3, ButtonAction::Off);
+    }
+
+    #[test]
+    fn the_default_config_carries_no_colours_macros_or_overrides() {
+        assert_eq!(Config::default().headset.buttons.as_array(), [ButtonAction::Default; 3]);
+    }
+
+    #[test]
+    fn every_action_name_reads() {
+        for name in [
+            "default",
+            "off",
+            "play_pause",
+            "stop",
+            "next_track",
+            "previous_track",
+            "mute",
+            "volume_up",
+            "volume_down",
+        ] {
+            let text = format!("[headset.buttons]\ng2 = \"{name}\"\n");
+            assert!(toml::from_str::<Config>(&text).is_ok(), "{name}");
+        }
+    }
+
+    #[test]
+    fn action_names_are_lower_case_only() {
+        assert!(toml::from_str::<Config>("[headset.buttons]\ng2 = \"PlayPause\"\n").is_err());
     }
 
     #[test]

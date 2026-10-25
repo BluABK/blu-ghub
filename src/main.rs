@@ -9,7 +9,8 @@
 
 /// Release builds abort on panic and have no console, so a crash would leave
 /// no trace. Write one line straight to today's log file (not through the
-/// logging thread, which an abort would cut short), then do the default.
+/// logging thread, which an abort would cut short), hand the headset's
+/// buttons back if blu-ghub holds them, then do the default.
 fn install_panic_hook() {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -33,6 +34,7 @@ fn install_panic_hook() {
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(file) {
             let _ = f.write_all(line.as_bytes());
         }
+        blu_ghub::app::devices::emergency_hand_back();
         default(info);
     }));
 }

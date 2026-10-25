@@ -664,7 +664,8 @@ impl App {
                 continue;
             }
             let rep = Reporter { shared: self.shared.clone(), hwnd: self.hwnd.0 as isize };
-            if let Some(w) = devices::start(link, &all, rep, poll) {
+            let buttons = self.config.headset.buttons.as_array();
+            if let Some(w) = devices::start(link, &all, rep, poll, buttons) {
                 self.workers.push(w);
             }
         }

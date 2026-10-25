@@ -10,7 +10,7 @@ g933-utils, OpenRGB, Solaar and the Linux kernel's hid-logitech-hidpp.
 | Collection | Usage | Reports | Notes |
 |---|---|---|---|
 | `MI_03&COL01` | 000C:0001 consumer | 5 in | volume up/down only |
-| `MI_03&COL02` | 000B:0001 telephony | 2 in | hook switch, phone mute |
+| `MI_03&COL02` | 000B:0001 telephony | 2 in | report 08: Phone Mute, Hook Switch; the mute button and boom while the G-keys are diverted |
 | `MI_03&COL03` | FF43:0202 | 20 in/out (id 0x11) | **HID++** (long reports only, device 0xFF) |
 | `MI_03&COL04` | FF00:0001 | 64 in/out/feature | vendor channel, **not HID++: never written** |
 
@@ -44,8 +44,38 @@ the logo. Current effect: fnE `[zone]` (probe: both off).
 
 ## Buttons: 0x8010
 
-3 G-keys (probe). fn2 `[01]` diverts them to the host, which then receives
-events `[mask]` (bit 0 = G1); `[00]` hands them back to the headset.
+3 G-keys (probe). fn2 `[01]` diverts them to the host and fn2 `[00]` hands
+them back; the reply echoes the parameter (sniffed: `11 FF 05 29 01`). While
+diverted, the headset sends events `[mask]`: one on press and one on release
+(`00`), bit 0 = G1 (verified: `01`, `02`, `04`).
+
+**Diverting the G-keys also diverts the microphone mute** (verified with
+`sniff --headset-all`). With the buttons diverted, the mute button and the
+boom no longer mute anything; they report on the telephony collection
+(COL02) instead, one report per action, with no release:
+
+| Report | Action | In the descriptor |
+|---|---|---|
+| `08 01` | mute button | Phone Mute (0B:002F, relative) |
+| `08 10` | boom raised: sent **twice**, about 35 ms apart | no: padding to Windows |
+| `08 20` | boom lowered | no: padding to Windows |
+
+(Bit 1 is Hook Switch, 0B:0020, never seen.) Each is followed some 50-80 ms
+later by an empty consumer report. Raising the boom still mutes in the
+headset, diverted or not; lowering it, or the mute button, does nothing
+while diverted. The host is expected to mute;
+the headset then follows the USB audio mute of its microphone, which is what
+Windows' mute of the recording device sets, LED included (verified: muting
+and unmuting the device in Windows' sound settings changed both). G HUB
+always diverts, so under G HUB this was G HUB's job.
+
+Not diverted, the headset mutes by itself and lights the LED, and the PC
+sees only an empty consumer report (`01 00 00 00 00`) per action: Windows'
+mute setting does not change and shows a stale state.
+
+Not yet verified: whether switching the headset off and on ends a
+diversion. blu-ghub re-diverts at every power-on, and a run that sees the
+buttons diverted when it does not want them hands them back.
 
 ## Sidetone 0x8300 and equaliser 0x8310
 

@@ -11,11 +11,13 @@ and never sits in the keystroke path.
 
 ## Status
 
-- **BluGHub** (the tray app): battery levels for the G915 and G935.
-- **BluGHub-diag**: the diagnostics used to work out what the devices do.
+- **BluGHub** (the tray app): battery levels for the G915 and G935, and the
+  G935's G1-G3 as media keys if you configure them.
+- **BluGHub-diag**: the diagnostics used to work out what the devices do, and
+  the keyboard's on-board G-keys.
 
-Lighting, G-keys and headset buttons come next. Until then the keyboard runs
-on what its on-board memory holds, which keeps working with nothing installed.
+Lighting and keyboard macros come next. Until then the keyboard runs on what
+its on-board memory holds, which keeps working with nothing installed.
 
 ## BluGHub
 
@@ -44,9 +46,9 @@ notification says so, once, until it has been charged again.
 
 Both devices also report battery changes on their own, so the fallback rarely
 matters. Nothing is sent to a sleeping keyboard or a switched-off headset; the
-app waits for them to announce themselves. The one write is to the receiver,
-not the keyboard: turning on its connection notifications if a replug has
-turned them off (G HUB used to do this).
+app waits for them to announce themselves. Two writes: turning on the
+receiver's connection notifications if a replug has turned them off (G HUB
+used to do this), and taking the headset's buttons over and back (below).
 
 Between those moments the app is idle: its main thread waits for Windows
 messages and each device's worker waits for that device, with no timers.
@@ -57,6 +59,30 @@ waits until it has. "Start with Windows" adds a per-user Run entry
 (`BluGHub --hidden`). Release builds put a shortcut in the Start Menu under
 *Blu Software*.
 
+**Headset buttons.** Out of the box blu-ghub leaves the G935's G1-G3 alone:
+they do what the headset's own firmware does with them. Give any of them an
+action in the config and blu-ghub takes all three over (the headset hands
+over all or none) each time the headset switches on, and hands them back when
+it quits.
+
+Taking the G-keys over takes the microphone mute with them: the headset no
+longer mutes by itself, and reports its mute button and boom to the PC
+instead. blu-ghub then mutes and unmutes the microphone in Windows (mute
+button: toggle; boom up: mute; boom down: unmute), and the headset and its
+LED follow, so Windows shows the real state, which it does not when the
+headset mutes by itself. If blu-ghub cannot find the microphone in Windows
+or cannot read the mute button, it does not take the buttons over at all, and
+if it crashes it hands them back on the way out. Right after a takeover the
+first press of the mute button may seem to do nothing, if the headset was
+muted by itself before (Windows did not know): press again. Do not run
+blu-ghub with buttons configured and G HUB at the same time: both would act
+on each press.
+
+The actions are sent as media keys, so the media player or the volume of the
+default output reacts as to a keyboard's media keys. Windows drops them
+while a window running as administrator has the focus, and while the PC is
+locked.
+
 **Config**: `%APPDATA%\BluGHub\BluGHub.toml`, every field optional:
 
 ```toml
@@ -64,7 +90,19 @@ waits until it has. "Start with Windows" adds a per-user Run entry
 low_battery_percent = 20     # 0 = no warning
 battery_check_minutes = 60   # the fallback reading, 5-1440
 log_retention_days = 14
+
+[headset.buttons]
+g1 = "previous_track"
+g2 = "next_track"
+g3 = "off"
 ```
+
+Button actions: `default` (leave it to the headset), `off`, `play_pause`,
+`stop`, `next_track`, `previous_track`, `mute` (the PC's sound output),
+`volume_up`, `volume_down`. All lower case. With any button set, one left at
+`default` does nothing. A file that does not parse is ignored as a whole,
+with a warning in the log: the app then runs on the defaults and takes
+nothing over.
 
 **Logs**: `%APPDATA%\BluGHub\logs\BluGHub.log.<date>`, one file a day.
 
@@ -75,9 +113,9 @@ A console program. `caps`, `keys` and `sniff` send nothing to any device;
 
 | Command | What it does |
 |---|---|
-| `BluGHub-diag caps` | Lists every Logitech HID collection with its usage and report sizes, read from the descriptors through handles opened with no access rights. |
+| `BluGHub-diag caps` | Lists every Logitech HID collection with its usage, report sizes and input items, read from the descriptors through handles opened with no access rights. |
 | `BluGHub-diag keys [--minutes N]` | Key-timing logger. Watches every keyboard through Raw Input (a copy of the input, not a hook, so it cannot slow typing) and flags the signatures of lost or late key releases. |
-| `BluGHub-diag sniff [--minutes N]` | Passive capture of the HID++ traffic from the receiver and the headset: notifications, and replies to whatever other program is talking to them. |
+| `BluGHub-diag sniff [--minutes N] [--headset-all]` | Passive capture of the HID++ traffic from the receiver and the headset: notifications, and replies to whatever other program is talking to them. `--headset-all` also listens to the headset's other collections (volume wheel, telephony, its vendor channel) and names what their reports carry from their own descriptors. |
 | `BluGHub-diag probe` | Asks the receiver, keyboard and headset what they are and support: feature table, name, firmware, battery, on-board profile mode, lighting zones and effects. Only "get" requests. |
 | `BluGHub-diag dump-onboard` | Reads the keyboard's on-board profile memory into one file per sector, with checksums: the backup to have before anything is ever written there. |
 
