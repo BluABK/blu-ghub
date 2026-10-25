@@ -17,13 +17,21 @@ the devices actually send. The tray app comes next.
 
 ## BluGHub-diag
 
-A console program. **None of its modes send anything to a device.**
+A console program. `caps`, `keys` and `sniff` send nothing to any device;
+`probe` and `dump-onboard` send HID++ *read* requests only.
 
 | Command | What it does |
 |---|---|
 | `BluGHub-diag caps` | Lists every Logitech HID collection with its usage and report sizes, read from the descriptors through handles opened with no access rights. |
 | `BluGHub-diag keys [--minutes N]` | Key-timing logger. Watches every keyboard through Raw Input (a copy of the input, not a hook, so it cannot slow typing) and flags the signatures of lost or late key releases. |
 | `BluGHub-diag sniff [--minutes N]` | Passive capture of the HID++ traffic from the receiver and the headset: notifications, and replies to whatever other program is talking to them. |
+| `BluGHub-diag probe` | Asks the receiver, keyboard and headset what they are and support: feature table, name, firmware, battery, on-board profile mode, lighting zones and effects. Only "get" requests. |
+| `BluGHub-diag dump-onboard` | Reads the keyboard's on-board profile memory into one file per sector, with checksums: the backup to have before anything is ever written there. |
+
+`probe` and `dump-onboard` refuse to run while another blu-ghub process is
+talking to the devices. What they found is written up in
+[docs/protocol-g915.md](docs/protocol-g915.md) and
+[docs/protocol-g935.md](docs/protocol-g935.md).
 
 Everything is also written to `%APPDATA%\BluGHub\diag\<mode>-<date>-<time>.log`.
 Ctrl+C (or closing the console) stops a run and writes a summary; long runs

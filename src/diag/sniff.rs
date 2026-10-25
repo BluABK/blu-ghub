@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 
-use super::{STOP, Tee, hex, install_stop_handler, now_stamp, stamp};
+use super::{STOP, Tee, TeeThread, hex, install_stop_handler, now_stamp, stamp};
 use crate::hid::{self, HidInfo, ReaderEnd, StopEvent};
 
 /// A HID++ report, decoded as far as is possible without knowing the
@@ -191,9 +191,13 @@ fn class(d: &Decoded) -> String {
 }
 
 pub fn run(minutes: Option<u64>) -> Result<()> {
-    let mut out = Tee::create("sniff");
-    out.line(&format!("BluGHub-diag sniff {} at {}", crate::version(), now_stamp()));
-    out.line("Read-only: nothing is sent to any device. Ctrl+C stops and prints a summary.");
+    let mut tee = Tee::create("sniff");
+    tee.line(&format!("BluGHub-diag sniff {} at {}", crate::version(), now_stamp()));
+    tee.line("Read-only: nothing is sent to any device. Ctrl+C stops and prints a summary.");
+    tee.flush();
+    // Output on its own thread, file first: a console that is busy or has a
+    // text selection open only delays what is shown, never the capture.
+    let mut out = TeeThread::spawn(tee);
 
     let endpoints = hidpp_endpoints(&hid::logitech_collections()?);
     if endpoints.is_empty() {
@@ -210,11 +214,11 @@ pub fn run(minutes: Option<u64>) -> Result<()> {
         let handle = match hid::open_read(&ep.path) {
             Ok(h) => h,
             Err(e) => {
-                out.line(&format!("  [{n}] {}: cannot open for reading: {e:#}", ep.short()));
+                out.line(format!("  [{n}] {}: cannot open for reading: {e:#}", ep.short()));
                 continue;
             }
         };
-        out.line(&format!(
+        out.line(format!(
             "  [{n}] {} {} (in {} bytes)",
             ep.short(),
             super::caps::role(ep),
@@ -255,12 +259,7 @@ pub fn run(minutes: Option<u64>) -> Result<()> {
                 let lag = chrono::Duration::from_std(r.at.elapsed()).unwrap_or_default();
                 let when = stamp(chrono::Local::now() - lag);
                 let d = decode(&r.data);
-                out.line(&format!(
-                    "{when} [{}] {:<44} {}",
-                    r.endpoint,
-                    d.to_string(),
-                    hex(&r.data)
-                ));
+                out.line(format!("{when} [{}] {:<44} {}", r.endpoint, d.to_string(), hex(&r.data)));
                 *counts.entry((r.endpoint, class(&d))).or_default() += 1;
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -271,7 +270,7 @@ pub fn run(minutes: Option<u64>) -> Result<()> {
         }
         let now = Instant::now();
         if now >= next_summary {
-            summary(&mut out, &endpoints, &counts, total, started.elapsed());
+            summary(&out, &endpoints, &counts, total, started.elapsed());
             // From now, not from the old target: one summary after a long
             // stall or a sleep, not one per missed hour.
             next_summary = now + Duration::from_secs(3600);
@@ -281,30 +280,29 @@ pub fn run(minutes: Option<u64>) -> Result<()> {
     stop.set();
     for r in readers {
         if let Ok(Some(why)) = r.join() {
-            out.line(&why);
+            out.line(why);
         }
     }
-    summary(&mut out, &endpoints, &counts, total, started.elapsed());
-    out.line(&format!("Written to {}", out.path.display()));
-    out.flush();
+    summary(&out, &endpoints, &counts, total, started.elapsed());
+    out.line(format!("Written to {}", out.path.display()));
+    out.close();
     Ok(())
 }
 
 fn summary(
-    out: &mut Tee,
+    out: &TeeThread,
     endpoints: &[HidInfo],
     counts: &BTreeMap<(usize, String), u64>,
     total: u64,
     elapsed: Duration,
 ) {
-    out.line(&format!(
+    out.line(format!(
         "--- summary after {:.1} min: {total} reports ---",
         elapsed.as_secs_f64() / 60.0
     ));
     for ((ep, class), n) in counts {
-        out.line(&format!("  [{ep}] {:<26} {class:<44} {n}", endpoints[*ep].short()));
+        out.line(format!("  [{ep}] {:<26} {class:<44} {n}", endpoints[*ep].short()));
     }
-    out.flush();
 }
 
 #[cfg(test)]

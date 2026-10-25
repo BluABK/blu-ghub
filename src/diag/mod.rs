@@ -5,6 +5,7 @@
 
 pub mod caps;
 pub mod keys;
+pub mod probe;
 pub mod sniff;
 
 use std::fs::{File, OpenOptions};
@@ -15,10 +16,7 @@ use std::sync::mpsc::{self, Sender};
 use std::thread::JoinHandle;
 
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, WPARAM};
-use windows::Win32::System::Console::{
-    CONSOLE_MODE, CTRL_C_EVENT, ENABLE_EXTENDED_FLAGS, ENABLE_QUICK_EDIT_MODE, GetConsoleMode,
-    GetStdHandle, STD_INPUT_HANDLE, SetConsoleCtrlHandler, SetConsoleMode,
-};
+use windows::Win32::System::Console::{CTRL_C_EVENT, SetConsoleCtrlHandler};
 use windows::Win32::System::Threading::SetEvent;
 use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE};
 use windows::core::BOOL;
@@ -71,42 +69,6 @@ unsafe extern "system" fn on_console_ctrl(kind: u32) -> BOOL {
         std::thread::sleep(std::time::Duration::from_secs(2));
     }
     BOOL(1)
-}
-
-/// Turn off QuickEdit for this program's console while it runs.
-///
-/// In the classic console a stray click starts a text selection, and while a
-/// selection is open every write to the console blocks. A logger that blocks
-/// stops reading its input, and the backlog it processes afterwards looks
-/// like keys pressed microseconds apart. Restored when the guard drops.
-pub struct QuickEditGuard(Option<(HANDLE, CONSOLE_MODE)>);
-
-pub fn disable_quick_edit() -> QuickEditGuard {
-    unsafe {
-        let Ok(h) = GetStdHandle(STD_INPUT_HANDLE) else { return QuickEditGuard(None) };
-        let mut mode = CONSOLE_MODE(0);
-        if GetConsoleMode(h, &mut mode).is_err() {
-            // Not a console (redirected input, or Windows Terminal's own
-            // handling): nothing to change.
-            return QuickEditGuard(None);
-        }
-        let new = CONSOLE_MODE((mode.0 | ENABLE_EXTENDED_FLAGS.0) & !ENABLE_QUICK_EDIT_MODE.0);
-        if SetConsoleMode(h, new).is_ok() {
-            QuickEditGuard(Some((h, mode)))
-        } else {
-            QuickEditGuard(None)
-        }
-    }
-}
-
-impl Drop for QuickEditGuard {
-    fn drop(&mut self) {
-        if let Some((h, mode)) = self.0 {
-            unsafe {
-                let _ = SetConsoleMode(h, mode);
-            }
-        }
-    }
 }
 
 /// A sink that writes each line to a file and to the console.

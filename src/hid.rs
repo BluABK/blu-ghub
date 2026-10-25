@@ -23,14 +23,16 @@ use windows::Win32::Devices::HumanInterfaceDevice::{
     HidP_GetCaps, PHIDP_PREPARSED_DATA,
 };
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_IO_PENDING, GENERIC_READ, HANDLE, WAIT_OBJECT_0,
+    CloseHandle, ERROR_IO_PENDING, GENERIC_READ, GENERIC_WRITE, HANDLE, WAIT_OBJECT_0,
 };
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_OVERLAPPED, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, OPEN_EXISTING, ReadFile,
+    FILE_SHARE_WRITE, OPEN_EXISTING, ReadFile, WriteFile,
 };
 use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
-use windows::Win32::System::Threading::{CreateEventW, INFINITE, SetEvent, WaitForMultipleObjects};
+use windows::Win32::System::Threading::{
+    CreateEventW, INFINITE, SetEvent, WaitForMultipleObjects, WaitForSingleObject,
+};
 use windows::core::PCWSTR;
 
 /// Logitech's USB vendor id.
@@ -159,6 +161,50 @@ pub fn open_query(path: &str) -> Result<OwnedHandle> {
 /// open handle its own copy of each input report.
 pub fn open_read(path: &str) -> Result<OwnedHandle> {
     open(path, GENERIC_READ.0, FILE_FLAG_OVERLAPPED)
+}
+
+/// Open a collection for overlapped reading and writing (shared). Only
+/// HID++ collections are ever opened this way.
+pub fn open_rw(path: &str) -> Result<OwnedHandle> {
+    open(path, GENERIC_READ.0 | GENERIC_WRITE.0, FILE_FLAG_OVERLAPPED)
+}
+
+/// Send one output report. `report_len` must be the collection's
+/// `OutputReportByteLength`: Windows takes exactly that many bytes, so a
+/// shorter report is zero-padded here — but a longer one is refused rather
+/// than truncated, because a HID++ report sent to the wrong collection must
+/// fail loudly, not arrive mangled.
+pub fn write_report(handle: &OwnedHandle, data: &[u8], report_len: usize) -> Result<()> {
+    if data.len() > report_len {
+        bail!("report of {} bytes does not fit a {report_len}-byte collection", data.len());
+    }
+    let mut buf = vec![0u8; report_len];
+    buf[..data.len()].copy_from_slice(data);
+    let event = OwnedHandle(
+        unsafe { CreateEventW(None, true, false, PCWSTR::null()) }
+            .context("creating the write event")?,
+    );
+    let mut ov = OVERLAPPED { hEvent: event.0, ..Default::default() };
+    let started = unsafe { WriteFile(handle.0, Some(&buf), None, Some(&mut ov)) };
+    if let Err(e) = started
+        && e.code() != ERROR_IO_PENDING.to_hresult()
+    {
+        bail!("WriteFile: {e}");
+    }
+    // A HID write completes in a few ms; one that has not after a second is
+    // stuck (device gone mid-write). Cancel it, then wait for the cancellation
+    // so the kernel is done with `buf` and `ov` before they are freed.
+    let waited = unsafe { WaitForSingleObject(event.0, 1000) };
+    let mut n = 0u32;
+    if waited != WAIT_OBJECT_0 {
+        unsafe {
+            let _ = CancelIoEx(handle.0, Some(&ov));
+            let _ = GetOverlappedResult(handle.0, &ov, &mut n, true);
+        }
+        bail!("the device did not accept the report within 1 s");
+    }
+    unsafe { GetOverlappedResult(handle.0, &ov, &mut n, false) }.context("write failed")?;
+    Ok(())
 }
 
 fn open(path: &str, access: u32, flags: FILE_FLAGS_AND_ATTRIBUTES) -> Result<OwnedHandle> {

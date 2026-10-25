@@ -13,6 +13,7 @@ compile_error!("blu-ghub talks to the Windows HID stack and only builds on Windo
 pub mod app_paths;
 pub mod diag;
 pub mod hid;
+pub mod hidpp;
 pub mod keynames;
 
 // The build script's target-folder cleanup, compiled here only so its tests
