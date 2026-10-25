@@ -166,6 +166,7 @@ and work with nothing installed. These commands change them:
 | `BluGHub-diag set-gkeys 2 G3=F15 G5=LCtrl G1=off` | Sets G-keys in profile 2 (M2). Keys: `F1`-`F24`, `LCtrl` `LShift` `LAlt` `LWin` (and `R...`), `off`, or `usage:0xNN`. |
 | `BluGHub-diag write-test 2` | Writes profile 2 back unchanged, to prove the write path. |
 | `BluGHub-diag restore-sector 2 FILE` | Puts a saved copy of a profile back. |
+| `BluGHub-diag light-test [--claim]` | Paints Escape red over the keyboard's stored lighting, in its memory only (nothing stored; a power cycle undoes it). `--claim` takes the lighting from the keyboard's own effects first, and hands it back on Enter. |
 | `BluGHub-diag keys --echo` | Prints each press of a non-text key (F-keys, modifiers, ...) to check the result. |
 
 Each write first reads the profile and checks its checksum, saves it to

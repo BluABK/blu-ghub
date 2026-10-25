@@ -73,9 +73,26 @@ linear interpolation). The device also sends the same three bytes as an event
 bitmap per page (zone = page × 112 + bit). Zones on this unit: 0-111 (HID
 keyboard usage − 3: F1-F12 = 55-66), modifiers 104-111, 153 (brightness key),
 155-158 (play/pause, mute, next, previous), 180-184 (G1-G5), 210 (logo).
-Set functions: fn1 individual zones (4 × `[zone, r, g, b]`), fn5 range, fn6
-one colour for up to 13 zones, fn7 frame end. Colours written this way are
-lost on power-off.
+Set functions (OpenRGB, Solaar, OpenLogi, and a G HUB capture agree):
+
+| fn | Params | Per request |
+|---|---|---|
+| 1 | `[zone, r, g, b] × 4`; a zone `FF` ends a shorter list | 4 zones |
+| 2 | `[first zone, (r g b) × 5]` consecutive zones | 5 |
+| 5 | `[first, last, r, g, b] × 3` ranges | 3 ranges |
+| 6 | `[r, g, b, zone × 13]` one colour | 13 zones |
+| 7 | frame end: `[persistence, frame(2), frames to next(2)]` | |
+
+Nothing shows until fn7. Its first byte is the persistence: 0 = RAM only,
+1 = also into the keyboard's own memory, which blu-ghub **never sends**.
+Replies echo the request (fn1: the zones, unused slots as `FF`).
+
+**Verified (E7), in on-board mode with the stored custom effect running and
+software control unclaimed (0x8071 fn5 get → `00 00 00`):** fn1 `[26 FF 00 00
+FF]` (Escape red) then fn7 `[00 ...]` turned Escape red and left every other
+key and the logo as they were. No claim, no mode change, nothing stored.
+Others report the stored layout comes back after a minute idle, on an M key,
+or at power-off. Escape is zone 0x26 (HID usage 0x29 − 3).
 
 **Effects, 0x8071.** Two clusters (probe):
 

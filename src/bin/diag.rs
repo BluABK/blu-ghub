@@ -19,6 +19,8 @@ fn usage() -> &'static str {
      BluGHub-diag write-test SECTOR          write a profile back unchanged\n  \
      BluGHub-diag set-gkeys SECTOR G3=F15 G5=LCtrl G1=off ...\n  \
      BluGHub-diag restore-sector SECTOR FILE put a saved sector back\n\n\
+     Lighting (nothing stored; a power cycle undoes it):\n  \
+     BluGHub-diag light-test [--claim]       paint Escape red over the stored layout\n\n\
      caps, keys and sniff send nothing to any device; probe and dump-onboard send\n\
      read requests only; only the three commands above write. Logs go to %APPDATA%\\BluGHub\\diag\\."
 }
@@ -36,6 +38,7 @@ fn main() -> Result<()> {
     let mut minutes = None;
     let mut echo = false;
     let mut headset_all = false;
+    let mut claim = false;
     let mut rest = Vec::new();
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -47,6 +50,7 @@ fn main() -> Result<()> {
             }
             "--echo" => echo = true,
             "--headset-all" => headset_all = true,
+            "--claim" => claim = true,
             "-h" | "--help" => {
                 println!("{}", usage());
                 return Ok(());
@@ -67,6 +71,7 @@ fn main() -> Result<()> {
         }
         ["keys"] => blu_ghub::diag::keys::run(minutes, echo),
         ["sniff"] => blu_ghub::diag::sniff::run(minutes, headset_all),
+        ["light-test"] => blu_ghub::diag::light::run(claim),
         _ => bail!("{}", usage()),
     }
 }

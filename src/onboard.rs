@@ -199,6 +199,11 @@ impl Keyboard {
         Ok(Keyboard { ch, dev, feat, sector_size, profiles: d[3] })
     }
 
+    /// The keyboard's HID++ channel and device index, for other features.
+    pub fn channel(&mut self) -> (&mut Channel, u8) {
+        (&mut self.ch, self.dev)
+    }
+
     /// The profile sector currently in use (the active M bank).
     pub fn current_profile(&mut self) -> Result<u16> {
         let p = self.ch.request(self.dev, self.feat, 4, &[])?;
