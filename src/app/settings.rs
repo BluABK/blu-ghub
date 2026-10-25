@@ -27,6 +27,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::devices::{Device, Shared, State, Status};
+use super::keyboard_editor;
 use crate::config::Config;
 use crate::ghub_import;
 use crate::input::ButtonAction;
@@ -229,6 +230,8 @@ struct Settings {
     /// G HUB's per-key presets once read, and the one picked.
     ghub: Option<Result<GHub, String>>,
     ghub_pick: usize,
+    tab: Tab,
+    editor: keyboard_editor::Editor,
     opened: Instant,
     auto_close: Option<Duration>,
     /// Passes of `logic` and painted frames, logged on close: an idle window
@@ -253,6 +256,8 @@ impl Settings {
             hex: Default::default(),
             ghub: None,
             ghub_pick: 0,
+            tab: Tab::Settings,
+            editor: Default::default(),
             opened: Instant::now(),
             auto_close,
             passes: 0,
@@ -265,6 +270,7 @@ impl Settings {
 
 impl Drop for Settings {
     fn drop(&mut self) {
+        super::devices::preview(None);
         let times: Vec<String> = self.frame_times.iter().map(|t| format!("{t:.1}")).collect();
         tracing::debug!(
             "settings window closed after {:.1} s: {} passes, {} painted (at {} s; asked for \
@@ -309,28 +315,70 @@ impl eframe::App for Settings {
         }
         let status = self.shared.lock().unwrap_or_else(|e| e.into_inner()).clone();
         egui::CentralPanel::default().show(ui, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                ui.heading("Devices");
-                ui.add_space(4.0);
-                egui::Grid::new("devices").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
-                    for device in [Device::Keyboard, Device::Headset] {
-                        ui.strong(device.name());
-                        ui.label(device_line(device, &status));
-                        ui.end_row();
-                    }
-                });
-                ui.add_space(12.0);
-                self.keyboard_lighting(ui);
-                ui.add_space(12.0);
-                self.headset_buttons(ui);
-                ui.add_space(12.0);
-                self.headset_lighting(ui);
-                ui.add_space(12.0);
-                self.general(ui);
-                ui.add_space(12.0);
-                self.save_row(ui);
+            let before = self.tab;
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.tab, Tab::Settings, "Settings");
+                ui.selectable_value(&mut self.tab, Tab::Keyboard, "G915 layout");
+            });
+            if self.tab == Tab::Keyboard && before != Tab::Keyboard {
+                // Room for the keyboard drawing.
+                let size = ui.ctx().input(|i| i.viewport().inner_rect).map(|r| r.size());
+                if let Some(s) = size
+                    && s.x < 900.0
+                {
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+                        920.0,
+                        s.y.max(620.0),
+                    )));
+                }
+            }
+            ui.separator();
+            egui::ScrollArea::vertical().show(ui, |ui| match self.tab {
+                Tab::Settings => self.settings_tab(ui, &status),
+                Tab::Keyboard => {
+                    self.keyboard_lighting(ui);
+                    ui.add_space(8.0);
+                    self.editor.show(ui, &mut self.draft.keyboard.lighting.keys);
+                    ui.add_space(12.0);
+                    self.save_row(ui);
+                }
             });
         });
+        // The layout on the keyboard while it is being edited.
+        let focused = ui.ctx().input(|i| i.viewport().focused).unwrap_or(true);
+        let keys = &self.draft.keyboard.lighting.keys;
+        let wanted =
+            (self.tab == Tab::Keyboard && self.editor.preview && focused && !keys.is_empty())
+                .then(|| keyboard_editor::frame(keys));
+        self.editor.send_preview(ui.ctx(), wanted);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    Settings,
+    Keyboard,
+}
+
+impl Settings {
+    fn settings_tab(&mut self, ui: &mut egui::Ui, status: &Status) {
+        ui.heading("Devices");
+        ui.add_space(4.0);
+        egui::Grid::new("devices").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
+            for device in [Device::Keyboard, Device::Headset] {
+                ui.strong(device.name());
+                ui.label(device_line(device, status));
+                ui.end_row();
+            }
+        });
+        ui.add_space(12.0);
+        self.headset_buttons(ui);
+        ui.add_space(12.0);
+        self.headset_lighting(ui);
+        ui.add_space(12.0);
+        self.general(ui);
+        ui.add_space(12.0);
+        self.save_row(ui);
     }
 }
 
@@ -342,20 +390,17 @@ struct GHub {
 
 impl Settings {
     fn keyboard_lighting(&mut self, ui: &mut egui::Ui) {
-        ui.heading("G915 lighting");
-        ui.add_space(4.0);
-        let keys = self.draft.keyboard.lighting.keys.len();
-        ui.label(if keys == 0 {
-            "No layout of blu-ghub's own yet.".to_owned()
-        } else {
-            format!("A layout of {keys} keys, kept for the layout editor.")
+        if self.draft.keyboard.lighting.keys.is_empty() {
+            ui.label("No layout of blu-ghub's own yet: import one from G HUB to start from.");
+        }
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.editor.preview, "Show it on the keyboard while editing")
+                .on_hover_text(
+                    "Painted into the keyboard's memory only, while this window has the \
+                     focus. The layout stored in the keyboard comes back by itself (when it \
+                     dims or sleeps, or after a power cycle); nothing is stored.",
+                );
         });
-        ui.label(
-            egui::RichText::new(
-                "The keyboard shows the layout stored in it; blu-ghub does not change it.",
-            )
-            .weak(),
-        );
         ui.add_space(4.0);
         match &self.ghub {
             None => {

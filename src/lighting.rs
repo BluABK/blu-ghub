@@ -15,7 +15,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use crate::hidpp::{Channel, feature};
 
 /// A colour, written `"#rrggbb"` in the config.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct Rgb(pub [u8; 3]);
 
 impl fmt::Display for Rgb {

@@ -5,8 +5,10 @@
 //!   requests only when a device connects or wakes, when asked, and as a
 //!   30-minute fallback while it is awake. If configured, the G935's G1-G3
 //!   as media keys, and with them its microphone mute ([`audio`]). Writes:
-//!   the receiver's own connection notifications, and taking the headset's
-//!   buttons over and back.
+//!   the receiver's own connection notifications, taking the headset's
+//!   buttons over and back, the headset's lighting, and while the G915
+//!   layout editor is open, per-key colours in the keyboard's RAM
+//!   ([`perkey`]; never stored).
 //! - [`diag`]: BluGHub-diag. `caps` reads HID descriptors through handles
 //!   opened with no access rights, `sniff` opens the HID++ collections (and
 //!   with `--headset-all` the headset's others) read-only, `keys` watches
@@ -28,10 +30,12 @@ pub mod hid;
 pub mod hidpp;
 pub mod icon_art;
 pub mod input;
+pub mod kblayout;
 pub mod keymap;
 pub mod keynames;
 pub mod lighting;
 pub mod onboard;
+pub mod perkey;
 pub mod platform;
 
 // The build script's target-folder cleanup, compiled here only so its tests

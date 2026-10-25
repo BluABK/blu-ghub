@@ -11,13 +11,15 @@ and never sits in the keystroke path.
 
 ## Status
 
-- **BluGHub** (the tray app): battery levels for the G915 and G935, and the
-  G935's G1-G3 as media keys if you configure them.
+- **BluGHub** (the tray app): battery levels for the G915 and G935, the
+  G935's G1-G3 as media keys and its lighting if you configure them, and a
+  per-key layout editor for the G915 with a live preview on the keyboard.
 - **BluGHub-diag**: the diagnostics used to work out what the devices do, and
   the keyboard's on-board G-keys.
 
-Lighting and keyboard macros come next. Until then the keyboard runs on what
-its on-board memory holds, which keeps working with nothing installed.
+Storing an edited layout in the keyboard, and keyboard macros, come next.
+Until then the keyboard runs on what its on-board memory holds, which keeps
+working with nothing installed.
 
 ## BluGHub
 
@@ -36,8 +38,8 @@ Quit
 ```
 
 **Settings…** opens a window with each device's state, battery, voltage and
-the time of the reading, and the settings below: the G935's buttons and
-lighting, the low-battery warning, how often batteries are read, how long logs are kept,
+the time of the reading, the G915 layout editor (below), and the settings
+below: the G935's buttons and lighting, the low-battery warning, how often batteries are read, how long logs are kept,
 and Start with Windows. Save applies them at once (a changed button hands
 the headset's buttons back and takes them again). Saving rewrites the
 config file, so comments written in it by hand do not survive; the version
@@ -61,9 +63,11 @@ notification says so, once, until it has been charged again.
 
 Both devices also report battery changes on their own, so the fallback rarely
 matters. Nothing is sent to a sleeping keyboard or a switched-off headset; the
-app waits for them to announce themselves. Two writes: turning on the
+app waits for them to announce themselves. The writes: turning on the
 receiver's connection notifications if a replug has turned them off (G HUB
-used to do this), and taking the headset's buttons over and back (below).
+used to do this), taking the headset's buttons over and back and setting its
+lighting (below), and, only while the layout editor is open, painting the
+keyboard's keys in its memory.
 Even with no buttons configured, the headset gets one hand-back the first
 time it is on, which undoes a takeover left behind by a killed run.
 
@@ -135,13 +139,23 @@ effect = "off"
 ```
 
 **Keyboard lighting.** The G915 plays a layout stored in itself, and
-blu-ghub leaves it so. `[keyboard.lighting.keys]` is blu-ghub's own copy of
-a layout, for the layout editor to come; nothing sends it to the keyboard
-yet. The settings window fills it from G HUB: *Read G HUB's layouts…* reads
-a copy of `%LOCALAPPDATA%\LGHUB\settings.db` (never the file itself), and
-*Import* takes the one picked. Key names follow the key's position on a US
-layout (`semicolon` is Ø on a Nordic board); the full list is in
-`src/keymap.rs`.
+blu-ghub leaves it so. `[keyboard.lighting.keys]` is blu-ghub's own layout,
+edited in the settings window's *G915 layout* tab: click a key, Ctrl-click
+or drag to pick more, double-click to pick every key of one colour, then
+choose a colour (picker, `#rrggbb`, or one of the colours in use). *Read G
+HUB's layouts…* reads a copy of `%LOCALAPPDATA%\LGHUB\settings.db` (never
+the file itself), and *Import* starts from the one picked.
+
+While that tab is open and the window has the focus, the layout is shown on
+the keyboard: only the keys that changed, at most ten times a second, and
+the whole frame every 20 seconds (the keyboard draws its stored layout over
+it whenever it dims or wakes, without saying so). It is painted into the
+keyboard's memory only, as G HUB does, so nothing is stored: the stored
+layout comes back by itself when the keyboard next dims or sleeps. Storing
+a layout in the keyboard is not done yet.
+
+Key names follow the key's position on a US layout (`semicolon` is Ø on a
+Nordic board); the full list is in `src/keymap.rs`.
 
 **Headset lighting.** A zone with no `[headset.lighting.*]` section is never
 written and shows whatever the headset does by itself. A configured one is

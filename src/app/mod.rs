@@ -14,6 +14,7 @@
 //! rather than panicking.
 
 pub mod devices;
+mod keyboard_editor;
 mod settings;
 
 use std::cell::{Cell, RefCell};

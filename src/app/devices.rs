@@ -27,13 +27,153 @@ use crate::battery::{self, Battery, HeadsetPower};
 use crate::hid::HidInfo;
 use crate::hidpp::{self, Channel, Event, HidppError, RECEIVER, Waker, feature};
 use crate::input::ButtonAction;
-use crate::lighting::HeadsetLighting;
+use crate::lighting::{HeadsetLighting, Rgb};
+use crate::perkey;
 
 pub const WM_APP_STATE: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 2;
 
 /// Control codes for a worker.
 pub const REFRESH: u8 = 1;
 pub const QUIT: u8 = 2;
+/// The keyboard's worker: the wanted preview changed.
+const PREVIEW: u8 = 3;
+
+/// A layout the settings window wants shown on the keyboard while it is
+/// being edited, as (zone, colour), and the keyboard worker to tell.
+struct PreviewSlot {
+    wanted: Option<Vec<(u8, Rgb)>>,
+    waker: Option<Waker>,
+}
+
+static PREVIEW_SLOT: Mutex<PreviewSlot> = Mutex::new(PreviewSlot { wanted: None, waker: None });
+
+fn preview_slot() -> std::sync::MutexGuard<'static, PreviewSlot> {
+    PREVIEW_SLOT.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Show `frame` on the keyboard, or stop showing anything (`None`). The
+/// keyboard's worker paints it into the keyboard's RAM only; the layout
+/// stored in the keyboard comes back by itself, at the latest when the
+/// keyboard next dims or sleeps.
+pub fn preview(frame: Option<Vec<(u8, Rgb)>>) {
+    let mut slot = preview_slot();
+    if slot.wanted == frame {
+        return;
+    }
+    slot.wanted = frame;
+    if let Some(w) = &slot.waker {
+        w.wake(PREVIEW);
+    }
+}
+
+/// While a preview is wanted, the whole frame is painted again this often:
+/// the keyboard draws its own layout over it whenever it dims or wakes, and
+/// says nothing when it does.
+const REPAINT: Duration = Duration::from_secs(20);
+
+/// The keyboard worker's side of the preview.
+#[derive(Default)]
+struct Painter {
+    feat: Option<u8>,
+    /// Gave up: no per-key feature, or the keyboard refused.
+    failed: bool,
+    /// What was last painted, and when the whole frame last was.
+    shown: std::collections::HashMap<u8, Rgb>,
+    full_at: Option<Instant>,
+}
+
+impl Painter {
+    /// When the frame is next due again, if a preview is up.
+    fn due(&self) -> Option<Instant> {
+        (!self.failed && preview_slot().wanted.is_some())
+            .then(|| self.full_at.map_or_else(Instant::now, |t| t + REPAINT))
+    }
+
+    /// The keyboard went to sleep or away: what it showed is gone.
+    fn forget(&mut self) {
+        self.shown.clear();
+        self.full_at = None;
+    }
+
+    fn paint(&mut self, ch: &mut Channel, dev: u8, name: &str) {
+        let Some(wanted) = preview_slot().wanted.clone() else {
+            self.forget();
+            return;
+        };
+        if self.failed {
+            return;
+        }
+        let feat = match self.feat {
+            Some(f) => f,
+            None => match ch.feature_index(dev, feature::PER_KEY_LIGHTING_V2) {
+                Ok(Some((f, _, _))) => *self.feat.insert(f),
+                Ok(None) => {
+                    warn!("{name}: no per-key lighting feature; no preview");
+                    self.failed = true;
+                    return;
+                }
+                Err(e) => {
+                    debug!("{name}: preview: {e}");
+                    return;
+                }
+            },
+        };
+        let full = self.full_at.is_none_or(|t| t.elapsed() >= REPAINT);
+        let changes: Vec<(u8, Rgb)> = if full {
+            wanted.clone()
+        } else {
+            wanted.iter().copied().filter(|(z, c)| self.shown.get(z) != Some(c)).collect()
+        };
+        if changes.is_empty() {
+            return;
+        }
+        let started = Instant::now();
+        let requests = perkey::requests(&changes);
+        for (func, params) in &requests {
+            match ch.request(dev, feat, *func, params) {
+                // fn1 echoes its zones, FF for one it did not take.
+                Ok(r) if *func == perkey::SET_ZONES => {
+                    for (sent, got) in params.chunks(4).zip(r.chunks(4)) {
+                        if sent.len() == 4 && got.first() == Some(&0xFF) {
+                            debug!("{name}: preview: zone {:#04x} refused", sent[0]);
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    warn!("{name}: preview stopped: {e}");
+                    self.failed = matches!(e, HidppError::Error20(_));
+                    self.forget();
+                    return;
+                }
+            }
+        }
+        if let Err(e) = ch.request(dev, feat, perkey::FRAME_END, &perkey::FRAME_END_RAM) {
+            warn!("{name}: preview stopped: {e}");
+            self.forget();
+            return;
+        }
+        self.shown = wanted.into_iter().collect();
+        if full {
+            self.full_at = Some(Instant::now());
+        }
+        debug!(
+            "{name}: preview: {} keys in {} requests, {} ms",
+            changes.len(),
+            requests.len() + 1,
+            started.elapsed().as_millis()
+        );
+    }
+}
+
+/// Unregisters the keyboard worker from previews when it ends.
+struct PreviewWorker;
+
+impl Drop for PreviewWorker {
+    fn drop(&mut self) {
+        preview_slot().waker = None;
+    }
+}
 
 /// A device as the user sees it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -339,6 +479,9 @@ fn keyboard(mut ch: Channel, link: Link, dev: u8, rep: &Reporter, poll: Duration
         enable_link_notifications(&mut ch);
     }
     rep.update(link, |s| s.state = State::Sleeping);
+    preview_slot().waker = Some(ch.waker());
+    let _unregister = PreviewWorker;
+    let mut painter = Painter::default();
     // Feature indices, looked up once the keyboard answers.
     let mut battery_idx: Option<u8> = None;
     let mut status_idx: Option<u8> = None;
@@ -400,13 +543,31 @@ fn keyboard(mut ch: Channel, link: Link, dev: u8, rep: &Reporter, poll: Duration
             }
         }
 
-        match ch.wait_event(wait_for(connected, due, poll)) {
+        let mut timeout = wait_for(connected, due, poll);
+        if connected && let Some(at) = painter.due() {
+            let left = at.saturating_duration_since(Instant::now());
+            timeout = Some(timeout.map_or(left, |t| t.min(left)));
+        }
+        match ch.wait_event(timeout) {
             Err(e) => {
                 info!("{name}: {e}");
                 return;
             }
-            Ok(None) => need_read = connected,
+            Ok(None) => {
+                let now = Instant::now() + Duration::from_millis(50);
+                need_read = connected && due.is_none_or(|d| d <= now);
+                if connected && painter.due().is_some_and(|d| d <= now) {
+                    painter.paint(&mut ch, dev, name);
+                }
+            }
             Ok(Some(Event::Control(QUIT))) => return,
+            Ok(Some(Event::Control(PREVIEW))) => {
+                if connected {
+                    painter.paint(&mut ch, dev, name);
+                } else {
+                    painter.forget();
+                }
+            }
             Ok(Some(Event::Control(_))) => need_read = true,
             Ok(Some(Event::Report(r))) => {
                 let d = &r.data;
@@ -422,6 +583,7 @@ fn keyboard(mut ch: Channel, link: Link, dev: u8, rep: &Reporter, poll: Duration
                         debug!("{name}: link down");
                         connected = false;
                         due = None;
+                        painter.forget();
                         rep.update(link, |s| s.state = State::Sleeping);
                     }
                 } else if let Some(p) = battery_idx.and_then(|i| event_payload(d, dev, i)) {
