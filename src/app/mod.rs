@@ -78,6 +78,8 @@ const WM_APP_LOCKED: u32 = WM_APP + 5;
 /// asked for it). `wparam` > 0: the `--settings-gate` measurement, that many
 /// open/close cycles.
 const WM_APP_SETTINGS: u32 = WM_APP + 6;
+/// The settings window saved the config: read it again and apply it.
+pub(super) const WM_APP_CONFIG: u32 = WM_APP + 7;
 
 const TRAY_ID: u32 = 1;
 /// Hotplug sends a burst of arrivals (one per HID collection); act once, a
@@ -105,6 +107,9 @@ struct App {
     icon: HICON,
     shared: Shared,
     config: Config,
+    /// Why the config file could not be read, if it could not: the app
+    /// then runs on defaults and the settings window will not save over it.
+    config_error: Option<String>,
     workers: Vec<Worker>,
     tray_ok: bool,
     tray_retries: u8,
@@ -228,11 +233,11 @@ pub fn run(args: &[String]) -> Result<()> {
     }
     let Some(mutex) = single_instance()? else { return Ok(()) };
 
-    let config = match Config::load(&crate::app_paths::config_path()) {
-        Ok(c) => c.sanitized(),
+    let (config, config_error) = match Config::load(&crate::app_paths::config_path()) {
+        Ok(c) => (c.sanitized(), None),
         Err(e) => {
             warn!("{e:#}; running on defaults");
-            Config::default()
+            (Config::default(), Some(format!("{e:#}")))
         }
     };
     info!("BluGHub {} starting", crate::version());
@@ -302,6 +307,7 @@ pub fn run(args: &[String]) -> Result<()> {
             icon,
             shared: Shared::default(),
             config,
+            config_error,
             workers: Vec::new(),
             tray_ok: false,
             tray_retries: 0,
@@ -484,6 +490,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             LRESULT(alive as isize)
         }
+        WM_APP_CONFIG => {
+            with_app(|a| a.reload_config());
+            LRESULT(0)
+        }
         WM_APP_SETTINGS => {
             match wparam.0 {
                 0 => {
@@ -568,10 +578,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
 /// dispatches this window's messages meanwhile.
 /// Returns whether a window ran (rather than an open one being raised).
 fn open_settings(auto_close: Option<Duration>) -> bool {
-    let Some(Some(shared)) = with_app(|a| (!a.shut_down).then(|| a.shared.clone())) else {
+    let editing = with_app(|a| {
+        (!a.shut_down).then(|| settings::Editing {
+            shared: a.shared.clone(),
+            config: a.config.clone(),
+            config_error: a.config_error.clone(),
+            tray: a.hwnd.0 as isize,
+        })
+    });
+    let Some(Some(editing)) = editing else {
         return false;
     };
-    let ran = match settings::run(shared, auto_close) {
+    let ran = match settings::run(editing, auto_close) {
         Ok(ran) => ran,
         Err(e) => {
             warn!("{e:#}");
@@ -827,6 +845,38 @@ impl App {
             let _ = DestroyIcon(self.icon);
         }
         debug!("shut down in {:?}", started.elapsed());
+    }
+
+    /// The settings window saved the file: read it back and apply what
+    /// changed. Workers take their settings when they start, so the ones
+    /// affected are restarted (the headset's hands its buttons back and
+    /// takes them again with the new actions).
+    fn reload_config(&mut self) {
+        if self.shut_down {
+            return;
+        }
+        let new = match Config::load(&crate::app_paths::config_path()) {
+            Ok(c) => c.sanitized(),
+            Err(e) => {
+                warn!("{e:#}; keeping the settings in use");
+                return;
+            }
+        };
+        self.config_error = None;
+        let old = std::mem::replace(&mut self.config, new);
+        let poll = old.settings.battery_check_minutes != self.config.settings.battery_check_minutes;
+        let buttons = old.headset.buttons != self.config.headset.buttons;
+        info!("settings saved{}", if poll || buttons { "; restarting workers" } else { "" });
+        let (stop, keep): (Vec<Worker>, Vec<Worker>) = std::mem::take(&mut self.workers)
+            .into_iter()
+            .partition(|w| poll || (buttons && w.link == Link::Headset));
+        self.workers = keep;
+        for w in stop {
+            w.stop();
+        }
+        self.reconcile_workers();
+        // The low-battery level applies from the next reading on.
+        self.warned_low = [false; 2];
     }
 
     fn on_command(&mut self, cmd: usize) {

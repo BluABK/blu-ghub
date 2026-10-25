@@ -2,7 +2,9 @@
 //!
 //! Hand-editable, and every field defaults, so a partial file still loads.
 //! A file that fails to parse is reported and the app runs on defaults, but
-//! nothing is ever saved over it.
+//! nothing is ever saved over it. Saving from the settings window writes the
+//! whole file afresh (hand-written comments do not survive) and keeps the
+//! version it replaces as `BluGHub.toml.bak`.
 
 use std::path::Path;
 
@@ -82,6 +84,26 @@ impl Config {
         self
     }
 
+    /// Write to `path` atomically: a temporary file in the same directory,
+    /// then a rename (across volumes a rename is a copy, and not atomic).
+    /// The version replaced is copied to `<name>.bak` first: atomicity
+    /// guards against a torn write, not against a well-formed wrong one.
+    pub fn save(&self, path: &Path) -> Result<()> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        }
+        let text = toml::to_string_pretty(self).context("writing the settings out")?;
+        let tmp = path.with_extension("toml.tmp");
+        std::fs::write(&tmp, text).with_context(|| format!("writing {}", tmp.display()))?;
+        // Best effort: a backup that cannot be made must not stop the save.
+        if path.exists()
+            && let Err(e) = std::fs::copy(path, backup_path(path))
+        {
+            tracing::warn!("could not back up {}: {e}", path.display());
+        }
+        std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))
+    }
+
     /// A missing file is a first run: defaults. An unreadable or invalid one
     /// is an error, so the caller can say so and refuse to overwrite it.
     pub fn load(path: &Path) -> Result<Config> {
@@ -94,9 +116,31 @@ impl Config {
     }
 }
 
+/// `<name>.bak` beside `path`.
+pub fn backup_path(path: &Path) -> std::path::PathBuf {
+    let name = path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+    path.with_file_name(format!("{name}.bak"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_saved_config_reads_back_the_same_and_keeps_a_backup() {
+        let dir = std::env::temp_dir().join(format!("blughub-test-{}", std::process::id()));
+        let path = dir.join("BluGHub.toml");
+        let mut c = Config::default();
+        c.settings.low_battery_percent = 25;
+        c.headset.buttons.g2 = ButtonAction::NextTrack;
+        c.save(&path).unwrap();
+        assert_eq!(Config::load(&path).unwrap(), c);
+        c.settings.low_battery_percent = 30;
+        c.save(&path).unwrap();
+        assert_eq!(Config::load(&path).unwrap(), c);
+        assert_eq!(Config::load(&backup_path(&path)).unwrap().settings.low_battery_percent, 25);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn a_missing_file_is_the_defaults() {

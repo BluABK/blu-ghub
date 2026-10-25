@@ -36,10 +36,18 @@ Quit
 ```
 
 **Settings…** opens a window with each device's state, battery, voltage and
-the time of the reading (for now that is all it shows). The window exists only
-while it is open: closing it frees its renderer, and the Direct3D driver hands
-its memory back some seconds later. While open and untouched it draws
-nothing; only the graphics driver keeps time with the display.
+the time of the reading, and the settings below: the G935's buttons, the
+low-battery warning, how often batteries are read, how long logs are kept,
+and Start with Windows. Save applies them at once (a changed button hands
+the headset's buttons back and takes them again). Saving rewrites the
+config file, so comments written in it by hand do not survive; the version
+replaced is kept as `BluGHub.toml.bak`. A file that could not be read when
+BluGHub started is never saved over.
+
+The window exists only while it is open: closing it frees its renderer, and
+the Direct3D driver hands its memory back some seconds later. While open and
+untouched it draws nothing; only the graphics driver keeps time with the
+display.
 
 A sleeping keyboard shows its last reading ("asleep (last 91%)"), a headset
 that is switched off likewise. When a battery drops to the warning level a

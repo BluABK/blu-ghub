@@ -27,6 +27,21 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::devices::{Device, Shared, State, Status};
+use crate::config::Config;
+use crate::input::ButtonAction;
+use crate::platform;
+
+/// What the window starts from, and where it reports a save.
+pub struct Editing {
+    pub shared: Shared,
+    /// The settings in use.
+    pub config: Config,
+    /// Why the file could not be read, if it could not: then nothing is
+    /// saved over it.
+    pub config_error: Option<String>,
+    /// The tray window, told when the file has been saved.
+    pub tray: isize,
+}
 
 thread_local! {
     /// From entering [`run`] until it returns, including eframe's start-up
@@ -130,7 +145,7 @@ fn icon(size_metric: windows::Win32::UI::WindowsAndMessaging::SYSTEM_METRICS_IND
 ///
 /// Must not be called while the app state is borrowed: the tray's messages
 /// are dispatched while it runs.
-pub fn run(shared: Shared, auto_close: Option<Duration>) -> Result<bool> {
+pub fn run(editing: Editing, auto_close: Option<Duration>) -> Result<bool> {
     if is_open() {
         raise();
         return Ok(false);
@@ -145,8 +160,8 @@ pub fn run(shared: Shared, auto_close: Option<Duration>) -> Result<bool> {
         wgpu_options: wgpu_options(),
         viewport: egui::ViewportBuilder::default()
             .with_title("BluGHub")
-            .with_inner_size([440.0, 220.0])
-            .with_min_inner_size([360.0, 180.0])
+            .with_inner_size([480.0, 470.0])
+            .with_min_inner_size([400.0, 300.0])
             // An empty icon turns eframe's icon handling off; see above.
             .with_icon(egui::IconData::default())
             // Otherwise each open initialises OLE on this thread for good.
@@ -178,7 +193,7 @@ pub fn run(shared: Shared, auto_close: Option<Duration>) -> Result<bool> {
             // long as a text field has the focus.
             cc.egui_ctx.all_styles_mut(|s| s.visuals.text_cursor.blink = false);
             CONTEXT.with(|c| *c.borrow_mut() = Some(cc.egui_ctx.clone()));
-            Ok(Box::new(Settings::new(shared, auto_close)))
+            Ok(Box::new(Settings::new(editing, auto_close)))
         }),
     );
     CONTEXT.with(|c| *c.borrow_mut() = None);
@@ -199,6 +214,14 @@ pub fn run(shared: Shared, auto_close: Option<Duration>) -> Result<bool> {
 
 struct Settings {
     shared: Shared,
+    tray: isize,
+    /// As in use, as edited, and why the file cannot be saved over.
+    saved: Config,
+    draft: Config,
+    locked: Option<String>,
+    autostart: bool,
+    /// The outcome of the last save or change, shown under the buttons.
+    note: Option<(String, bool)>,
     opened: Instant,
     auto_close: Option<Duration>,
     /// Passes of `logic` and painted frames, logged on close: an idle window
@@ -211,9 +234,15 @@ struct Settings {
 }
 
 impl Settings {
-    fn new(shared: Shared, auto_close: Option<Duration>) -> Self {
+    fn new(editing: Editing, auto_close: Option<Duration>) -> Self {
         Self {
-            shared,
+            shared: editing.shared,
+            tray: editing.tray,
+            saved: editing.config.clone(),
+            draft: editing.config,
+            locked: editing.config_error,
+            autostart: platform::starts_with_windows(),
+            note: None,
             opened: Instant::now(),
             auto_close,
             passes: 0,
@@ -270,16 +299,142 @@ impl eframe::App for Settings {
         }
         let status = self.shared.lock().unwrap_or_else(|e| e.into_inner()).clone();
         egui::CentralPanel::default().show(ui, |ui| {
-            ui.heading("Devices");
-            ui.add_space(4.0);
-            egui::Grid::new("devices").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
-                for device in [Device::Keyboard, Device::Headset] {
-                    ui.strong(device.name());
-                    ui.label(device_line(device, &status));
-                    ui.end_row();
-                }
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                ui.heading("Devices");
+                ui.add_space(4.0);
+                egui::Grid::new("devices").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
+                    for device in [Device::Keyboard, Device::Headset] {
+                        ui.strong(device.name());
+                        ui.label(device_line(device, &status));
+                        ui.end_row();
+                    }
+                });
+                ui.add_space(12.0);
+                self.headset_buttons(ui);
+                ui.add_space(12.0);
+                self.general(ui);
+                ui.add_space(12.0);
+                self.save_row(ui);
             });
         });
+    }
+}
+
+impl Settings {
+    fn headset_buttons(&mut self, ui: &mut egui::Ui) {
+        ui.heading("G935 buttons");
+        ui.add_space(4.0);
+        let b = &mut self.draft.headset.buttons;
+        egui::Grid::new("buttons").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
+            // In the order they sit on the ear cup, top to bottom (power
+            // switch above, mute button and volume wheel below).
+            for (name, slot) in [("G3", &mut b.g3), ("G2", &mut b.g2), ("G1", &mut b.g1)] {
+                ui.strong(name);
+                egui::ComboBox::from_id_salt(name)
+                    .selected_text(slot.label())
+                    .width(200.0)
+                    .show_ui(ui, |ui| {
+                        for a in ButtonAction::ALL {
+                            ui.selectable_value(slot, a, a.label());
+                        }
+                    });
+                ui.end_row();
+            }
+        });
+        let actions = b.as_array();
+        let taken = actions.iter().any(|a| *a != ButtonAction::Default);
+        let hint = if !taken {
+            "The headset keeps its buttons and mutes its microphone by itself."
+        } else if actions.contains(&ButtonAction::Default) {
+            "blu-ghub takes all three over, and with them the microphone mute (mute \
+             button: toggle; boom up: mute; boom down: unmute). A button left to the \
+             headset then does nothing."
+        } else {
+            "blu-ghub takes all three over, and with them the microphone mute (mute \
+             button: toggle; boom up: mute; boom down: unmute)."
+        };
+        ui.add_space(2.0);
+        ui.label(egui::RichText::new(hint).weak());
+    }
+
+    fn general(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Batteries and logs");
+        ui.add_space(4.0);
+        let s = &mut self.draft.settings;
+        egui::Grid::new("general").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
+            ui.label("Warn below");
+            ui.add(egui::DragValue::new(&mut s.low_battery_percent).range(0..=100).suffix(" %"))
+                .on_hover_text("A notification when a battery drops to this; 0 = never.");
+            ui.end_row();
+            ui.label("Read batteries every");
+            ui.add(
+                egui::DragValue::new(&mut s.battery_check_minutes).range(5..=1440).suffix(" min"),
+            )
+            .on_hover_text(
+                "Only a fallback: both devices report changes by themselves. Nothing is \
+                 sent to a device that is asleep or switched off.",
+            );
+            ui.end_row();
+            ui.label("Keep logs for");
+            ui.add(egui::DragValue::new(&mut s.log_retention_days).range(1..=3650).suffix(" days"))
+                .on_hover_text("Takes effect at the next start.");
+            ui.end_row();
+        });
+        ui.add_space(4.0);
+        // Not part of the file: a per-user Run entry, changed at once.
+        if ui.checkbox(&mut self.autostart, "Start with Windows").changed()
+            && let Err(e) = platform::set_start_with_windows(self.autostart)
+        {
+            self.note = Some((format!("Start with Windows: {e:#}"), true));
+            self.autostart = platform::starts_with_windows();
+        }
+    }
+
+    fn save_row(&mut self, ui: &mut egui::Ui) {
+        if let Some(why) = &self.locked {
+            ui.label(
+                egui::RichText::new(format!(
+                    "The settings file could not be read, so it is not saved over; fix it \
+                     by hand and restart BluGHub. ({why})"
+                ))
+                .color(ui.visuals().error_fg_color),
+            );
+            return;
+        }
+        let changed = self.draft != self.saved;
+        ui.horizontal(|ui| {
+            if ui.add_enabled(changed, egui::Button::new("Save")).clicked() {
+                self.save();
+            }
+            if ui.add_enabled(changed, egui::Button::new("Undo changes")).clicked() {
+                self.draft = self.saved.clone();
+                self.note = None;
+            }
+        });
+        if let Some((text, error)) = &self.note {
+            let color =
+                if *error { ui.visuals().error_fg_color } else { ui.visuals().weak_text_color() };
+            ui.label(egui::RichText::new(text).color(color));
+        }
+    }
+
+    fn save(&mut self) {
+        let path = crate::app_paths::config_path();
+        match self.draft.save(&path) {
+            Ok(()) => {
+                self.saved = self.draft.clone();
+                self.note = Some(("Saved.".into(), false));
+                unsafe {
+                    let _ = PostMessageW(
+                        Some(HWND(self.tray as *mut _)),
+                        super::WM_APP_CONFIG,
+                        WPARAM(0),
+                        LPARAM(0),
+                    );
+                }
+            }
+            Err(e) => self.note = Some((format!("Not saved: {e:#}"), true)),
+        }
     }
 }
 

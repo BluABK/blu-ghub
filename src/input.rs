@@ -36,6 +36,33 @@ pub enum ButtonAction {
 }
 
 impl ButtonAction {
+    pub const ALL: [ButtonAction; 9] = [
+        ButtonAction::Default,
+        ButtonAction::Off,
+        ButtonAction::PlayPause,
+        ButtonAction::Stop,
+        ButtonAction::NextTrack,
+        ButtonAction::PreviousTrack,
+        ButtonAction::Mute,
+        ButtonAction::VolumeUp,
+        ButtonAction::VolumeDown,
+    ];
+
+    /// For the settings window.
+    pub fn label(self) -> &'static str {
+        match self {
+            ButtonAction::Default => "Left to the headset",
+            ButtonAction::Off => "Nothing",
+            ButtonAction::PlayPause => "Play/pause",
+            ButtonAction::Stop => "Stop",
+            ButtonAction::NextTrack => "Next track",
+            ButtonAction::PreviousTrack => "Previous track",
+            ButtonAction::Mute => "Mute the PC's sound",
+            ButtonAction::VolumeUp => "Volume up",
+            ButtonAction::VolumeDown => "Volume down",
+        }
+    }
+
     fn vk(self) -> Option<VIRTUAL_KEY> {
         Some(match self {
             ButtonAction::PlayPause => VK_MEDIA_PLAY_PAUSE,
@@ -80,21 +107,9 @@ fn tap(vk: VIRTUAL_KEY) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
-    const ALL: [ButtonAction; 9] = [
-        ButtonAction::Default,
-        ButtonAction::Off,
-        ButtonAction::PlayPause,
-        ButtonAction::Stop,
-        ButtonAction::NextTrack,
-        ButtonAction::PreviousTrack,
-        ButtonAction::Mute,
-        ButtonAction::VolumeUp,
-        ButtonAction::VolumeDown,
-    ];
-
     #[test]
     fn every_action_but_default_and_off_sends_a_key() {
-        for a in ALL {
+        for a in ButtonAction::ALL {
             let quiet = matches!(a, ButtonAction::Default | ButtonAction::Off);
             assert_eq!(a.vk().is_none(), quiet, "{a:?}");
         }
