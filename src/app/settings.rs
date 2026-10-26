@@ -702,9 +702,11 @@ impl Settings {
                 }
                 if let Some(ms) = d.report_ms {
                     ui.label("Receiver's record");
-                    ui.label(format!(
-                        "{ms} ms (its pairing record; Solaar calls it the polling rate)"
-                    ));
+                    ui.label(format!("{ms} ms (pairing record)")).on_hover_text(
+                        "Byte 2 of the receiver's pairing record for the keyboard, which Solaar \
+                         shows as its polling rate. The keyboard's own report rate is the row \
+                         above.",
+                    );
                     ui.end_row();
                 }
                 if let Some((now, max)) = d.backlight {
