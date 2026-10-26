@@ -91,8 +91,15 @@ Replies echo the request (fn1: the zones, unused slots as `FF`).
 software control unclaimed (0x8071 fn5 get → `00 00 00`):** fn1 `[26 FF 00 00
 FF]` (Escape red) then fn7 `[00 ...]` turned Escape red and left every other
 key and the logo as they were. No claim, no mode change, nothing stored.
-Others report the stored layout comes back after a minute idle, on an M key,
-or at power-off. Escape is zone 0x26 (HID usage 0x29 − 3).
+The stored layout comes back by itself after about a minute idle (seen on
+the receiver), on an M key, or at power-off. Escape is zone 0x26 (HID usage
+0x29 − 3).
+
+**With software control claimed** (0x8071 fn5 set `[01 01 00]`: on, RGB
+clusters only, not power modes), on the cable: the painted Escape stayed
+for well over 90 s idle, and the keyboard did not dim. Not yet seen on the
+receiver, where the keyboard dims and sleeps. fn5 `[01 00 00]` hands the
+lighting back; the keyboard forgets the claim at power-off.
 
 **Effects, 0x8071.** Two clusters (probe):
 
@@ -149,6 +156,11 @@ switching both ways reads back at once. In host mode the keys and F-row type
 as usual (F5 is F5), the lighting shown stays and a painted key shows over it,
 the G-keys and M keys do nothing, and the M lights go out; 0x8020 fn1 is
 accepted but shows nothing there either (G-keys not taken at the time).
+With the G-keys taken as well (`host-test --divert`), 0x8020 fn1 **does**
+light the M keys (M1, then M3 on request). The stored lighting still draws
+over a painted key after a while idle, in host mode as in on-board mode:
+the mode turns the profiles off, not the effect engine (see the claim
+above). Back in on-board mode the keyboard lights its own profile again.
 
 A profile sector's G1-G5 bindings sit at offset 32 (below); blu-ghub reads
 all three profiles' bindings when it takes the keys, so a key it leaves to

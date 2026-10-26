@@ -238,7 +238,8 @@ and work with nothing installed. These commands change them:
 | `BluGHub-diag write-test 2` | Writes profile 2 back unchanged, to prove the write path. |
 | `BluGHub-diag restore-sector 2 FILE` | Puts a saved copy of a profile back. |
 | `BluGHub-diag host-test [--leave]` | Tries the keyboard's host mode (software drives it, as G HUB does with its on-board memory off): asks for the word HOST first, lights M1, paints Escape red in its memory, and switches back to on-board mode on Enter. `--leave` stays in host mode, to see whether a power cycle ends it. |
-| `BluGHub-diag host-test --restore` | Says which mode the keyboard is in and puts it back in on-board mode. |
+| `BluGHub-diag host-test --divert` | The same, with the G-keys taken as the tray app takes them: asks for the M1 light, waits 90 s with the keyboard untouched, asks for the M3 light, then hands the G-keys back and switches to on-board mode. |
+| `BluGHub-diag host-test --restore` | Hands the G-keys back, says which mode the keyboard is in, and puts it back in on-board mode. |
 | `BluGHub-diag slots` | Reads what the keyboard's stored-lighting slots hold: whether each is in use, its length, and the id and name G HUB gave it. Read requests only. |
 | `BluGHub-diag light-test [--claim]` | Paints Escape red over the keyboard's stored lighting, in its memory only (nothing stored; a power cycle undoes it). `--claim` takes the lighting from the keyboard's own effects first, and hands it back on Enter. |
 | `BluGHub-diag keys --echo` | Prints each press of a non-text key (F-keys, modifiers, ...) to check the result. |
