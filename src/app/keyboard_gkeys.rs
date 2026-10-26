@@ -448,6 +448,8 @@ impl Takeover {
             }
             GAction::Off => None,
             GAction::Text(t) => Some(Action::Text(t.clone())),
+            GAction::Paste(t) => Some(Action::Paste(t.clone())),
+            GAction::PasteFile(p) => Some(Action::PasteFile(p.clone())),
             GAction::Media(a) => match a {
                 ButtonAction::Default | ButtonAction::Off => None,
                 a => Some(Action::Media(*a)),
@@ -584,6 +586,8 @@ fn summary(a: Option<&Action>) -> String {
         None => "nothing".into(),
         Some(Action::Keys(k)) => format!("{} key(s) held", k.len()),
         Some(Action::Text(t)) => format!("text, {} characters", t.chars().count()),
+        Some(Action::Paste(t)) => format!("paste, {} characters", t.chars().count()),
+        Some(Action::PasteFile(_)) => "paste a file".into(),
         Some(Action::Media(m)) => format!("{m:?}"),
         Some(Action::Macro(m)) => format!("macro {:?}", m.name),
     }

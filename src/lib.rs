@@ -24,6 +24,7 @@ pub mod app;
 pub mod app_paths;
 pub mod audio;
 pub mod battery;
+pub mod clipboard;
 pub mod config;
 pub mod diag;
 pub mod ghub_import;

@@ -235,6 +235,8 @@ struct Settings {
     editor: keyboard_editor::Editor,
     /// The M bank shown in the G-key section.
     gkey_bank: usize,
+    /// An open file dialog: for which (bank, key), and its answer.
+    browsing: Option<((usize, usize), FileAnswer)>,
     opened: Instant,
     auto_close: Option<Duration>,
     /// Passes of `logic` and painted frames, logged on close: an idle window
@@ -262,6 +264,7 @@ impl Settings {
             tab: Tab::Settings,
             editor: Default::default(),
             gkey_bank: 0,
+            browsing: None,
             opened: Instant::now(),
             auto_close,
             passes: 0,
@@ -508,14 +511,39 @@ impl Settings {
         let macros: Vec<String> = self.draft.macros.iter().map(|m| m.name.clone()).collect();
         let b = self.gkey_bank;
         let bank = self.draft.keyboard.gkeys.banks_mut().into_iter().nth(b);
+        let mut browse = None;
         if let Some(bank) = bank {
             egui::Grid::new(("gkeys", b)).num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
                 for (i, action) in bank.keys_mut().into_iter().enumerate() {
                     ui.strong(format!("G{}", i + 1));
-                    ui.horizontal(|ui| gkey_editor(ui, (b, i), action, &macros));
+                    if ui.horizontal(|ui| gkey_editor(ui, (b, i), action, &macros)).inner {
+                        browse = Some((b, i));
+                    }
                     ui.end_row();
                 }
             });
+        }
+        if let Some(at) = browse
+            && self.browsing.is_none()
+        {
+            self.browsing = Some((at, pick_file(ui.ctx().clone())));
+        }
+        // The file dialog's answer.
+        if let Some(((b, i), rx)) = &self.browsing {
+            match rx.try_recv() {
+                Ok(picked) => {
+                    let (b, i) = (*b, *i);
+                    self.browsing = None;
+                    if let Some(path) = picked
+                        && let Some(bank) = self.draft.keyboard.gkeys.banks_mut().into_iter().nth(b)
+                        && let Some(slot) = bank.keys_mut().into_iter().nth(i)
+                    {
+                        *slot = GAction::PasteFile(path);
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.browsing = None,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
         }
         ui.add_space(4.0);
         let g = &mut self.draft.keyboard.gkeys;
@@ -734,17 +762,34 @@ fn read_ghub() -> Result<GHub, String> {
     Ok(GHub { doc, presets })
 }
 
-/// One G-key: left to the keyboard, nothing, text, a media key or a macro.
-fn gkey_editor(ui: &mut egui::Ui, id: (usize, usize), action: &mut GAction, macros: &[String]) {
-    const KINDS: [&str; 5] =
-        ["The keyboard's own", "Nothing", "Type text", "Media or volume key", "Macro"];
+/// One G-key: left to the keyboard, nothing, text (typed or pasted), a
+/// file to paste, a media key or a macro. `true` when "Browse…" was
+/// clicked.
+fn gkey_editor(
+    ui: &mut egui::Ui,
+    id: (usize, usize),
+    action: &mut GAction,
+    macros: &[String],
+) -> bool {
+    const KINDS: [&str; 7] = [
+        "The keyboard's own",
+        "Nothing",
+        "Type text",
+        "Paste text",
+        "Paste a file or image",
+        "Media or volume key",
+        "Macro",
+    ];
     let kind = |a: &GAction| match a {
         GAction::Default => 0,
         GAction::Off => 1,
         GAction::Text(_) => 2,
-        GAction::Media(_) => 3,
-        GAction::Macro(_) => 4,
+        GAction::Paste(_) => 3,
+        GAction::PasteFile(_) => 4,
+        GAction::Media(_) => 5,
+        GAction::Macro(_) => 6,
     };
+    let mut browse = false;
     let mut k = kind(action);
     egui::ComboBox::from_id_salt(("gkind", id)).selected_text(KINDS[k]).width(160.0).show_ui(
         ui,
@@ -759,13 +804,42 @@ fn gkey_editor(ui: &mut egui::Ui, id: (usize, usize), action: &mut GAction, macr
             0 => GAction::Default,
             1 => GAction::Off,
             2 => GAction::Text(String::new()),
-            3 => GAction::Media(ButtonAction::PlayPause),
+            3 => GAction::Paste(String::new()),
+            4 => GAction::PasteFile(Default::default()),
+            5 => GAction::Media(ButtonAction::PlayPause),
             _ => GAction::Macro(macros.first().cloned().unwrap_or_default()),
         };
     }
     match action {
         GAction::Text(t) => {
-            ui.add(egui::TextEdit::singleline(t).desired_width(200.0).hint_text("text to type"));
+            ui.add(egui::TextEdit::singleline(t).desired_width(200.0).hint_text("text to type"))
+                .on_hover_text("Typed as if from a keyboard, whatever its layout.");
+        }
+        GAction::Paste(t) => {
+            ui.add(egui::TextEdit::singleline(t).desired_width(200.0).hint_text("text to paste"))
+                .on_hover_text(
+                    "Put on the clipboard and pasted with Ctrl+V; what was on the clipboard \
+                     goes back after. For programs that drop typed text (Windows 11's \
+                     Notepad).",
+                );
+        }
+        GAction::PasteFile(p) => {
+            let mut text = p.to_string_lossy().into_owned();
+            if ui
+                .add(
+                    egui::TextEdit::singleline(&mut text)
+                        .desired_width(200.0)
+                        .hint_text("file to paste"),
+                )
+                .on_hover_text(
+                    "Pasted as a file, as Explorer's Copy would (chat programs upload it); an \
+                     image also as a picture. What was on the clipboard goes back after.",
+                )
+                .changed()
+            {
+                *p = text.into();
+            }
+            browse = ui.button("Browse…").clicked();
         }
         GAction::Media(m) => {
             egui::ComboBox::from_id_salt(("gmedia", id))
@@ -794,6 +868,52 @@ fn gkey_editor(ui: &mut egui::Ui, id: (usize, usize), action: &mut GAction, macr
         }
         GAction::Default | GAction::Off => {}
     }
+    browse
+}
+
+/// The file dialog's answer; `None`: cancelled.
+type FileAnswer = std::sync::mpsc::Receiver<Option<std::path::PathBuf>>;
+
+/// The file dialog, on a thread of its own: its modal loop would run the
+/// settings window's messages from inside a frame otherwise. The answer
+/// comes back through the receiver.
+fn pick_file(ctx: egui::Context) -> FileAnswer {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let _ = std::thread::Builder::new().name("file-dialog".into()).spawn(move || {
+        use windows::Win32::System::Com::{
+            COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize,
+        };
+        use windows::Win32::UI::Controls::Dialogs::{
+            GetOpenFileNameW, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR, OFN_PATHMUSTEXIST,
+            OPENFILENAMEW,
+        };
+        let com = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
+        let mut file = vec![0u16; 1024];
+        let filter: Vec<u16> = "Images\0*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.webp;*.tif;*.tiff;*.ico\0\
+                                All files\0*.*\0\0"
+            .encode_utf16()
+            .collect();
+        let title: Vec<u16> = "File to paste\0".encode_utf16().collect();
+        let mut ofn = OPENFILENAMEW {
+            lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
+            lpstrFilter: windows::core::PCWSTR(filter.as_ptr()),
+            lpstrFile: windows::core::PWSTR(file.as_mut_ptr()),
+            nMaxFile: file.len() as u32,
+            lpstrTitle: windows::core::PCWSTR(title.as_ptr()),
+            Flags: OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR,
+            ..Default::default()
+        };
+        let picked = unsafe { GetOpenFileNameW(&mut ofn) }.as_bool().then(|| {
+            let end = file.iter().position(|&c| c == 0).unwrap_or(file.len());
+            std::path::PathBuf::from(String::from_utf16_lossy(&file[..end]))
+        });
+        if com {
+            unsafe { CoUninitialize() };
+        }
+        let _ = tx.send(picked);
+        ctx.request_repaint();
+    });
+    rx
 }
 
 /// One zone: left to the headset, or an effect with its colour, speed

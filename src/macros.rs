@@ -27,6 +27,8 @@ pub enum Action {
     /// Keys held for as long as the G-key is (modifiers first).
     Keys(Vec<Key>),
     Text(String),
+    Paste(String),
+    PasteFile(std::path::PathBuf),
     Media(ButtonAction),
     Macro(Macro),
 }
@@ -50,6 +52,8 @@ pub trait Out {
     fn down(&mut self, k: Key);
     fn up(&mut self, k: Key);
     fn text(&mut self, t: &str);
+    fn paste(&mut self, t: &str);
+    fn paste_file(&mut self, p: &std::path::Path);
     fn media(&mut self, a: ButtonAction);
 }
 
@@ -71,6 +75,16 @@ impl Out for Windows {
             debug!("typing: {e}");
         }
     }
+    fn paste(&mut self, t: &str) {
+        if let Err(e) = crate::clipboard::paste_text(t) {
+            warn!("pasting: {e}");
+        }
+    }
+    fn paste_file(&mut self, p: &std::path::Path) {
+        if let Err(e) = crate::clipboard::paste_file(p) {
+            warn!("pasting {}: {e}", p.display());
+        }
+    }
     fn media(&mut self, a: ButtonAction) {
         if let Err(e) = a.run() {
             debug!("typing: {e}");
@@ -89,7 +103,11 @@ impl Runner {
         let (tx, rx) = channel();
         let thread = std::thread::Builder::new()
             .name("gkeys".into())
-            .spawn(move || Engine::new(Windows, rx).run())
+            .spawn(move || {
+                // For decoding images to paste.
+                let _com = crate::audio::Com::init().ok();
+                Engine::new(Windows, rx).run()
+            })
             .map_err(|e| warn!("cannot start the G-key thread: {e}"))
             .ok();
         Runner { tx, thread }
@@ -171,6 +189,8 @@ impl<O: Out> Engine<O> {
                 self.held.insert(key, keys);
             }
             Action::Text(t) => self.out.text(&t),
+            Action::Paste(t) => self.out.paste(&t),
+            Action::PasteFile(p) => self.out.paste_file(&p),
             Action::Media(a) => self.out.media(a),
             Action::Macro(m) => debug!("macro {:?}: another one is running", m.name),
         }
@@ -247,6 +267,8 @@ impl<O: Out> Engine<O> {
                 }
             }
             Step::Text(t) => self.out.text(t),
+            Step::Paste(t) => self.out.paste(t),
+            Step::PasteFile(p) => self.out.paste_file(p),
             Step::Media(a) => self.out.media(*a),
             Step::Delay(_) => {}
         }
@@ -306,6 +328,12 @@ mod tests {
         }
         fn text(&mut self, t: &str) {
             self.0.push(format!("text {t}"));
+        }
+        fn paste(&mut self, t: &str) {
+            self.0.push(format!("paste {t}"));
+        }
+        fn paste_file(&mut self, p: &std::path::Path) {
+            self.0.push(format!("paste file {}", p.display()));
         }
         fn media(&mut self, a: ButtonAction) {
             self.0.push(format!("media {a:?}"));

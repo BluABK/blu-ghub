@@ -8,7 +8,8 @@
 
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
-    KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, KEYEVENTF_UNICODE, SendInput, VIRTUAL_KEY, VK_PAUSE,
+    KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, KEYEVENTF_UNICODE, SendInput, VIRTUAL_KEY, VK_CONTROL,
+    VK_PAUSE, VK_V,
 };
 
 use crate::keymap;
@@ -178,6 +179,18 @@ fn send(inputs: &[INPUT]) -> std::io::Result<()> {
     }
     let sent = unsafe { SendInput(inputs, std::mem::size_of::<INPUT>() as i32) };
     if sent == inputs.len() as u32 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+}
+
+/// Ctrl+V, by virtual key: paste, whatever the layout.
+pub fn ctrl_v() -> std::io::Result<()> {
+    let up = KEYEVENTF_KEYUP;
+    let none = KEYBD_EVENT_FLAGS(0);
+    send(&[
+        input(VK_CONTROL, 0, none),
+        input(VK_V, 0, none),
+        input(VK_V, 0, up),
+        input(VK_CONTROL, 0, up),
+    ])
 }
 
 pub fn down(k: Key) -> std::io::Result<()> {

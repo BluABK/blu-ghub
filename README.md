@@ -229,17 +229,29 @@ At its first contact blu-ghub puts a keyboard it finds in host mode back
 into on-board mode, unless it is about to use it.
 
 Actions: `default`, `off`, `{ text = "..." }` (typed as Unicode, whatever
-the layout; a line break presses Enter), `{ media = "..." }` (the headset
-buttons' actions), `{ macro = "name" }`. Macro steps: `{ tap = "key" }`,
-`{ down = "key" }`, `{ up = "key" }`, `{ text = "..." }`,
-`{ media = "..." }`, `{ delay = ms }`, with the key names above plus
-`f13`-`f24`. A macro runs `once` per press, over and over `while_held`, or
-as a `toggle` from one press to the next; one runs at a time, and any key
-it left down is released when it ends. The settings window picks the
-actions; macros are written in the file for now. Typing goes in as if from
-a keyboard, so it does not reach a window running as administrator.
-Windows 11's Notepad sometimes shows typed text cut short or garbled;
-other programs show all of it.
+the layout; a line break presses Enter), `{ paste = "..." }`,
+`{ paste_file = "C:\\path\\picture.png" }`, `{ media = "..." }` (the
+headset buttons' actions), `{ macro = "name" }`. Macro steps:
+`{ tap = "key" }`, `{ down = "key" }`, `{ up = "key" }`, `{ text = "..." }`,
+`{ paste = "..." }`, `{ paste_file = "..." }`, `{ media = "..." }`,
+`{ delay = ms }`, with the key names above plus `f13`-`f24`. A macro runs
+`once` per press, over and over `while_held`, or as a `toggle` from one
+press to the next; one runs at a time, and any key it left down is released
+when it ends. The settings window picks the actions; macros are written in
+the file for now. Typing goes in as if from a keyboard, so it does not reach
+a window running as administrator. Windows 11's Notepad sometimes shows
+typed text cut short or garbled; other programs show all of it.
+
+**Pasting** goes through the clipboard: what is on it is saved, the text or
+file is put there and Ctrl+V pressed, and after 0.4 s the saved contents go
+back, unless something else was copied meanwhile. What blu-ghub puts there
+stays out of Windows' clipboard history and cloud clipboard. A file is
+pasted as a file, as Explorer's Copy does (chat programs upload it, a GIF
+stays animated); an image file (PNG, JPEG, GIF, BMP, TIFF, WebP, icon) also
+as a picture, and a PNG also as its own bytes, which keeps transparency in
+browsers and chat programs. Saving and restoring covers text, files, rich
+text and pictures; drawings held only as Windows metafiles are not put
+back.
 
 **Headset lighting.** A zone with no `[headset.lighting.*]` section is never
 written and shows whatever the headset does by itself. A configured one is

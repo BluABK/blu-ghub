@@ -37,6 +37,10 @@ pub enum GAction {
     Off,
     /// Type this text, whatever the keyboard layout.
     Text(String),
+    /// Paste this text (through the clipboard, which is put back after).
+    Paste(String),
+    /// Paste this file; an image also as image data.
+    PasteFile(std::path::PathBuf),
     /// A media or volume key.
     Media(ButtonAction),
     /// Run the macro of this name.
@@ -163,6 +167,9 @@ pub enum Step {
     /// are released then.
     Up(String),
     Text(String),
+    /// Paste text, or a file, through the clipboard.
+    Paste(String),
+    PasteFile(std::path::PathBuf),
     Media(ButtonAction),
     /// Wait this many milliseconds.
     Delay(u32),
@@ -264,6 +271,16 @@ mod tests {
         assert!(m.problems().is_empty());
         let again: Doc = toml::from_str(&toml::to_string(&d).unwrap()).unwrap();
         assert_eq!(again, d);
+    }
+
+    #[test]
+    fn paste_actions_read() {
+        let d: Doc = toml::from_str(
+            "[gkeys.m1]\ng1 = { paste = \"hi\" }\ng2 = { paste_file = \"C:\\\\pics\\\\a.png\" }\n",
+        )
+        .unwrap();
+        assert_eq!(d.gkeys.m1.g1, GAction::Paste("hi".into()));
+        assert_eq!(d.gkeys.m1.g2, GAction::PasteFile(r"C:\pics\a.png".into()));
     }
 
     #[test]
