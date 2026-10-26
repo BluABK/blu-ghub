@@ -685,13 +685,13 @@ fn copy_wide(dst: &mut [u16], s: &str) {
 /// One line per device, for the tooltip and the menu.
 fn describe(device: Device, status: &Status) -> String {
     let s = status.device(device);
-    let name = device.name();
+    let name = device.label();
     let off = if device == Device::Headset { "off" } else { "asleep" };
     match (&s.state, &s.battery) {
         (State::Absent, _) => format!("{name}: not connected"),
-        (State::Connected, Some(b)) => format!("{name}: {}", b.short()),
+        (State::Connected, Some(b)) => format!("{name}: {}", b.shown()),
         (State::Connected, None) => format!("{name}: connected"),
-        (State::Sleeping, Some(b)) => format!("{name}: {off} (last {})", b.short()),
+        (State::Sleeping, Some(b)) => format!("{name}: {off} (last {})", b.shown()),
         (State::Sleeping, None) => format!("{name}: {off}"),
     }
 }
@@ -796,7 +796,7 @@ impl App {
             // the line does not warn again and again.
             if !self.warned_low[i] && !b.charging && b.percent <= threshold {
                 self.warned_low[i] = true;
-                let text = format!("{} battery is at {}%.", device.name(), b.percent);
+                let text = format!("{} battery is at {}%.", device.label(), b.percent);
                 self.balloon("Battery low", &text, true);
                 info!("{text}");
             } else if self.warned_low[i] && (b.charging || b.percent > threshold.saturating_add(10))
@@ -999,7 +999,7 @@ mod tests {
         let mut s = Status::default();
         s.keyboard_receiver.state = State::Sleeping;
         s.keyboard_receiver.battery = crate::battery::from_g915(&[0x0F, 0xEE, 0x00]);
-        assert_eq!(describe(Device::Keyboard, &s), "G915: asleep (last 91%)");
-        assert_eq!(describe(Device::Headset, &s), "G935: not connected");
+        assert_eq!(describe(Device::Keyboard, &s), "\u{2328} G915: asleep (last \u{1F50B} 91%)");
+        assert_eq!(describe(Device::Headset, &s), "\u{1F3A7} G935: not connected");
     }
 }

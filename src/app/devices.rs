@@ -286,6 +286,20 @@ impl Device {
             Device::Headset => "G935",
         }
     }
+
+    /// A symbol for the kind of device, to tell the two apart at a glance.
+    pub fn icon(self) -> &'static str {
+        match self {
+            Device::Keyboard => "\u{2328}",
+            Device::Headset => "\u{1F3A7}",
+        }
+    }
+
+    /// The name with its symbol in front, where people read it: the symbols
+    /// line up when the two are listed.
+    pub fn label(self) -> String {
+        format!("{} {}", self.icon(), self.name())
+    }
 }
 
 /// A connection a worker serves. The G915 has two: through its LIGHTSPEED

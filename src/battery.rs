@@ -29,6 +29,12 @@ impl Battery {
             format!("{}%", self.percent)
         }
     }
+
+    /// [`Battery::short`] with a battery symbol in front, where people
+    /// read it (the logs keep the plain text).
+    pub fn shown(&self) -> String {
+        format!("\u{1F50B} {}", self.short())
+    }
 }
 
 /// Linear interpolation over a (millivolts, percent) table sorted by

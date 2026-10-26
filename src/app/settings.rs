@@ -327,7 +327,11 @@ impl eframe::App for Settings {
             let before = self.tab;
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.tab, Tab::Settings, "Settings");
-                ui.selectable_value(&mut self.tab, Tab::Keyboard, "G915 layout");
+                ui.selectable_value(
+                    &mut self.tab,
+                    Tab::Keyboard,
+                    format!("{} layout", Device::Keyboard.label()),
+                );
                 ui.selectable_value(&mut self.tab, Tab::Macros, "Macros");
             });
             if self.tab == Tab::Keyboard && before != Tab::Keyboard {
@@ -388,7 +392,7 @@ impl Settings {
         ui.add_space(4.0);
         egui::Grid::new("devices").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
             for device in [Device::Keyboard, Device::Headset] {
-                ui.strong(device.name());
+                ui.strong(device.label());
                 ui.label(device_line(device, status));
                 ui.end_row();
             }
@@ -511,7 +515,7 @@ impl Settings {
     }
 
     fn keyboard_gkeys(&mut self, ui: &mut egui::Ui) {
-        ui.heading("G915 G-keys");
+        ui.heading(format!("{} G-keys", Device::Keyboard.label()));
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             for (i, name) in ["M1", "M2", "M3"].into_iter().enumerate() {
@@ -595,7 +599,7 @@ impl Settings {
     }
 
     fn headset_buttons(&mut self, ui: &mut egui::Ui) {
-        ui.heading("G935 buttons");
+        ui.heading(format!("{} buttons", Device::Headset.label()));
         ui.add_space(4.0);
         let b = &mut self.draft.headset.buttons;
         egui::Grid::new("buttons").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
@@ -631,7 +635,7 @@ impl Settings {
     }
 
     fn headset_lighting(&mut self, ui: &mut egui::Ui) {
-        ui.heading("G935 lighting");
+        ui.heading(format!("{} lighting", Device::Headset.label()));
         ui.add_space(4.0);
         let l = &mut self.draft.headset.lighting;
         let [hex_sides, hex_logo] = &mut self.hex;
@@ -997,7 +1001,7 @@ fn device_line(device: Device, status: &Status) -> String {
     let via = if cable { " (cable)" } else { "" };
     let reading = s.battery.as_ref().map(|b| {
         let at = chrono::DateTime::<chrono::Local>::from(b.at).format("%H:%M");
-        format!("{}, {} mV, read at {at}", b.short(), b.millivolts)
+        format!("{}, {} mV, read at {at}", b.shown(), b.millivolts)
     });
     match (&s.state, reading) {
         (State::Absent, _) => "not connected".into(),
@@ -1021,7 +1025,7 @@ mod tests {
         s.keyboard_receiver.battery = Some(b);
         assert_eq!(
             device_line(Device::Keyboard, &s),
-            format!("asleep; last 91%, 4078 mV, read at {at}")
+            format!("asleep; last \u{1F50B} 91%, 4078 mV, read at {at}")
         );
         assert_eq!(device_line(Device::Headset, &s), "not connected");
     }
