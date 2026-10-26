@@ -235,6 +235,7 @@ struct Settings {
     editor: keyboard_editor::Editor,
     /// The M bank shown in the G-key section.
     gkey_bank: usize,
+    macro_editor: super::macro_editor::MacroEditor,
     /// An open file dialog: for which (bank, key), and its answer.
     browsing: Option<((usize, usize), FileAnswer)>,
     opened: Instant,
@@ -264,6 +265,7 @@ impl Settings {
             tab: Tab::Settings,
             editor: Default::default(),
             gkey_bank: 0,
+            macro_editor: Default::default(),
             browsing: None,
             opened: Instant::now(),
             auto_close,
@@ -326,6 +328,7 @@ impl eframe::App for Settings {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.tab, Tab::Settings, "Settings");
                 ui.selectable_value(&mut self.tab, Tab::Keyboard, "G915 layout");
+                ui.selectable_value(&mut self.tab, Tab::Macros, "Macros");
             });
             if self.tab == Tab::Keyboard && before != Tab::Keyboard {
                 // Room for the keyboard drawing.
@@ -346,6 +349,12 @@ impl eframe::App for Settings {
                     self.keyboard_lighting(ui);
                     ui.add_space(8.0);
                     self.editor.show(ui, &mut self.draft.keyboard.lighting.keys);
+                    ui.add_space(12.0);
+                    self.save_row(ui);
+                }
+                Tab::Macros => {
+                    let d = &mut self.draft;
+                    self.macro_editor.show(ui, &mut d.macros, &mut d.keyboard.gkeys);
                     ui.add_space(12.0);
                     self.save_row(ui);
                 }
@@ -370,6 +379,7 @@ impl eframe::App for Settings {
 enum Tab {
     Settings,
     Keyboard,
+    Macros,
 }
 
 impl Settings {
@@ -573,23 +583,14 @@ impl Settings {
             "The keyboard keeps its G-keys and does what its own profile says."
         };
         ui.label(egui::RichText::new(hint).weak());
-        if !self.draft.macros.is_empty() {
-            ui.add_space(4.0);
-            ui.label("Macros (written in BluGHub.toml for now):");
-            for m in &self.draft.macros {
-                let steps = m.steps.len();
-                ui.label(format!(
-                    "  {}: {}, {steps} step{}",
-                    m.name,
-                    m.mode.label(),
-                    if steps == 1 { "" } else { "s" }
-                ));
-                for p in m.problems() {
-                    ui.label(
-                        egui::RichText::new(format!("    {p}")).color(ui.visuals().error_fg_color),
-                    );
-                }
-            }
+        let problems: usize = self.draft.macros.iter().map(|m| m.problems().len()).sum();
+        if problems > 0 {
+            ui.label(
+                egui::RichText::new(format!(
+                    "{problems} problem(s) in the macros: see the Macros tab."
+                ))
+                .color(ui.visuals().error_fg_color),
+            );
         }
     }
 
@@ -854,7 +855,7 @@ fn gkey_editor(
                 });
         }
         GAction::Macro(_) if macros.is_empty() => {
-            ui.label(egui::RichText::new("no macros in BluGHub.toml yet").weak());
+            ui.label(egui::RichText::new("no macros yet: make one in the Macros tab").weak());
         }
         GAction::Macro(name) => {
             egui::ComboBox::from_id_salt(("gmacro", id))
@@ -872,12 +873,12 @@ fn gkey_editor(
 }
 
 /// The file dialog's answer; `None`: cancelled.
-type FileAnswer = std::sync::mpsc::Receiver<Option<std::path::PathBuf>>;
+pub(super) type FileAnswer = std::sync::mpsc::Receiver<Option<std::path::PathBuf>>;
 
 /// The file dialog, on a thread of its own: its modal loop would run the
 /// settings window's messages from inside a frame otherwise. The answer
 /// comes back through the receiver.
-fn pick_file(ctx: egui::Context) -> FileAnswer {
+pub(super) fn pick_file(ctx: egui::Context) -> FileAnswer {
     let (tx, rx) = std::sync::mpsc::channel();
     let _ = std::thread::Builder::new().name("file-dialog".into()).spawn(move || {
         use windows::Win32::System::Com::{

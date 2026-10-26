@@ -237,8 +237,10 @@ headset buttons' actions), `{ macro = "name" }`. Macro steps:
 `{ delay = ms }`, with the key names above plus `f13`-`f24`. A macro runs
 `once` per press, over and over `while_held`, or as a `toggle` from one
 press to the next; one runs at a time, and any key it left down is released
-when it ends. The settings window picks the actions; macros are written in
-the file for now. Typing goes in as if from a keyboard, so it does not reach
+when it ends. The settings window picks the actions (Settings → G915
+G-keys) and makes the macros (the Macros tab: steps added, reordered and
+removed; renaming a macro follows into the G-keys, and one in use cannot be
+deleted). Typing goes in as if from a keyboard, so it does not reach
 a window running as administrator. Windows 11's Notepad sometimes shows
 typed text cut short or garbled; other programs show all of it.
 

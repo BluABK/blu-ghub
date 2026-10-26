@@ -16,6 +16,7 @@
 pub mod devices;
 mod keyboard_editor;
 pub mod keyboard_gkeys;
+mod macro_editor;
 mod settings;
 
 use std::cell::{Cell, RefCell};
