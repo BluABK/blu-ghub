@@ -131,6 +131,7 @@ logo = "#2a6fd4"
 [keyboard.gkeys]
 show_bank = true              # G1-G5 in the bank's colour while blu-ghub has them
 bank_colors = ["#2080ff", "#30d040", "#ff8010"]   # M1, M2, M3
+light_m_keys = false          # light the M keys themselves (host mode, see below)
 
 [keyboard.gkeys.m1]           # G1-G5 while M1 is lit; m2, m3 likewise
 g1 = { text = "On my way!" }
@@ -207,6 +208,16 @@ G1-G5 light up in the bank's colour instead, which holds the keyboard's own
 lighting effects off as a layout of blu-ghub's does (no dimming after a
 minute; it still sleeps); the rest of the keyboard shows whichever layout
 is chosen.
+
+With `light_m_keys`, the bank's M key itself is lit. The keyboard only lets
+the host light the M keys in host mode, so while blu-ghub has the G-keys it
+switches the keyboard to host mode (its on-board profiles off; blu-ghub
+stands in for them), and back to on-board mode when it lets go, including
+on a crash. A power cycle also ends host mode. If blu-ghub is killed or
+hangs meanwhile, the G and M keys do nothing until it starts again or the
+keyboard is switched off and on; typing and the lighting are not affected.
+At its first contact blu-ghub puts a keyboard it finds in host mode back
+into on-board mode, unless it is about to use it.
 
 Actions: `default`, `off`, `{ text = "..." }` (typed as Unicode, whatever
 the layout; a line break presses Enter), `{ media = "..." }` (the headset

@@ -524,6 +524,13 @@ impl Settings {
                 egui::widgets::color_picker::color_edit_button_srgb(ui, &mut g.bank_colors[i].0);
             }
         });
+        ui.checkbox(&mut g.light_m_keys, "Light the M keys").on_hover_text(
+            "The keyboard only lets blu-ghub light them in host mode, so while blu-ghub has \
+             the G-keys the keyboard is switched to host mode, and back to on-board mode when \
+             blu-ghub lets go. If blu-ghub is killed meanwhile, the G and M keys do nothing \
+             until it starts again or the keyboard is switched off and on; typing and lighting \
+             are not affected.",
+        );
         ui.add_space(2.0);
         let hint = if self.draft.keyboard.gkeys.wanted() {
             "blu-ghub takes all five G-keys over (the keyboard hands over all or none); \

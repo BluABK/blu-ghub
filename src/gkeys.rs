@@ -84,6 +84,11 @@ pub struct GKeys {
     pub show_bank: bool,
     /// For M1, M2, M3.
     pub bank_colors: [Rgb; 3],
+    /// While blu-ghub has the G-keys, light the bank's M key. The keyboard
+    /// only lets the host light them in host mode, so it is switched to
+    /// host mode meanwhile, and back to on-board mode when blu-ghub lets go
+    /// (a power cycle also ends host mode).
+    pub light_m_keys: bool,
     pub m1: Bank,
     pub m2: Bank,
     pub m3: Bank,
@@ -98,6 +103,7 @@ impl Default for GKeys {
                 Rgb([0x30, 0xD0, 0x40]),
                 Rgb([0xFF, 0x80, 0x10]),
             ],
+            light_m_keys: false,
             m1: Bank::default(),
             m2: Bank::default(),
             m3: Bank::default(),
@@ -233,6 +239,7 @@ mod tests {
         assert!(d.gkeys.show_bank);
         assert_eq!(d.gkeys.bank_colors[2], Rgb([7, 8, 9]));
         assert!(!GKeys::default().show_bank);
+        assert!(!GKeys::default().light_m_keys);
         // Showing the bank alone takes nothing over.
         assert!(!d.gkeys.wanted());
     }

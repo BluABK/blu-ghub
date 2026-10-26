@@ -687,7 +687,7 @@ fn keyboard_loop(
                     continue;
                 }
                 if let Some(p) = gkeys.mkey_feature().and_then(|m| event_payload(d, dev, m)) {
-                    if gkeys.on_mkeys(p[0]) {
+                    if gkeys.on_mkeys(ch, dev, p[0]) {
                         painter.overlay = gkeys.indicator();
                         painter.paint(ch, dev, name);
                     }
