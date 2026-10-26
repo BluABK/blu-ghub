@@ -511,6 +511,19 @@ impl Settings {
                 }
             });
         }
+        ui.add_space(4.0);
+        let g = &mut self.draft.keyboard.gkeys;
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut g.show_bank, "Show the bank on G1-G5:").on_hover_text(
+                "While blu-ghub has the G-keys, the M keys' own lights stay dark, so G1-G5 \
+                 light up in the bank's colour instead. This holds the keyboard's own lighting \
+                 effects off (it no longer dims after a minute; it still sleeps).",
+            );
+            for (i, name) in ["M1", "M2", "M3"].into_iter().enumerate() {
+                ui.label(name);
+                egui::widgets::color_picker::color_edit_button_srgb(ui, &mut g.bank_colors[i].0);
+            }
+        });
         ui.add_space(2.0);
         let hint = if self.draft.keyboard.gkeys.wanted() {
             "blu-ghub takes all five G-keys over (the keyboard hands over all or none); \

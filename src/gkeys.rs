@@ -24,6 +24,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::input::ButtonAction;
+use crate::lighting::Rgb;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -75,12 +76,33 @@ impl Bank {
 }
 
 /// The three banks, as the M1-M3 keys pick them.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GKeys {
+    /// While blu-ghub has the G-keys (and with them the M keys, whose
+    /// lights then go dark), light G1-G5 in the bank's colour.
+    pub show_bank: bool,
+    /// For M1, M2, M3.
+    pub bank_colors: [Rgb; 3],
     pub m1: Bank,
     pub m2: Bank,
     pub m3: Bank,
+}
+
+impl Default for GKeys {
+    fn default() -> Self {
+        GKeys {
+            show_bank: false,
+            bank_colors: [
+                Rgb([0x20, 0x80, 0xFF]),
+                Rgb([0x30, 0xD0, 0x40]),
+                Rgb([0xFF, 0x80, 0x10]),
+            ],
+            m1: Bank::default(),
+            m2: Bank::default(),
+            m3: Bank::default(),
+        }
+    }
 }
 
 impl GKeys {
@@ -200,6 +222,19 @@ mod tests {
         assert_eq!(b.g4, GAction::Off);
         assert_eq!(b.g5, GAction::Default);
         assert!(d.gkeys.wanted());
+    }
+
+    #[test]
+    fn the_bank_colours_read_and_default() {
+        let d: Doc = toml::from_str(
+            "[gkeys]\nshow_bank = true\nbank_colors = [\"#010203\", \"#040506\", \"#070809\"]\n",
+        )
+        .unwrap();
+        assert!(d.gkeys.show_bank);
+        assert_eq!(d.gkeys.bank_colors[2], Rgb([7, 8, 9]));
+        assert!(!GKeys::default().show_bank);
+        // Showing the bank alone takes nothing over.
+        assert!(!d.gkeys.wanted());
     }
 
     #[test]

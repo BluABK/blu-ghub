@@ -12,8 +12,10 @@
 //! itself: it starts at the keyboard's profile when the keys are taken
 //! (0x8100 fn4, a read) and follows the M keys from there. The keyboard
 //! stays on its profile throughout, and is back on it, lights and all, when
-//! the keys are handed back. blu-ghub asks for the bank's light (0x8020
-//! fn1, RAM only), which this keyboard does not show in on-board mode.
+//! the keys are handed back. The keyboard does not show M lights asked for
+//! by the host in on-board mode (0x8020 fn1 is accepted, nothing lights),
+//! so blu-ghub can instead light G1-G5 in the bank's colour
+//! ([`Takeover::indicator`], painted by the keyboard worker's lighting).
 //!
 //! The takeover ends when the keyboard sleeps or goes away (it is taken
 //! again when it wakes), and blu-ghub hands the keys back when it quits, or
@@ -28,6 +30,7 @@ use crate::gkeys::{GAction, GKeys, Macro};
 use crate::hidpp::{self, Channel, HidppError, feature};
 use crate::inject;
 use crate::input::ButtonAction;
+use crate::lighting::Rgb;
 use crate::macros::{Action, Cmd, Runner};
 
 /// What the keyboard worker needs to know.
@@ -66,11 +69,9 @@ pub struct Takeover {
     setup: Setup,
     gkey: Option<u8>,
     onboard: Option<u8>,
-    /// MKEYS: the M keys' reports and lights; looked up when the keys are
-    /// taken.
+    /// MKEYS: the M keys' reports while the keys are taken; looked up
+    /// when they are.
     mkeys: Option<u8>,
-    /// The M light shown, as last set.
-    lit: Option<usize>,
     diverted: bool,
     /// A takeover was asked for, so a hand-back is owed at the end.
     attempted: bool,
@@ -103,7 +104,6 @@ impl Takeover {
             gkey: None,
             onboard: None,
             mkeys: None,
-            lit: None,
             diverted: false,
             attempted: false,
             failed: false,
@@ -129,19 +129,33 @@ impl Takeover {
     }
 
     /// An M-key report while blu-ghub has the keys: the key pressed picks
-    /// the bank (the release, all bits clear, is ignored).
-    pub fn on_mkeys(&mut self, ch: &mut Channel, dev: u8, mask: u8) {
+    /// the bank (the release, all bits clear, is ignored). `true` if the
+    /// bank changed.
+    pub fn on_mkeys(&mut self, mask: u8) -> bool {
         if !self.diverted || mask == 0 {
-            return;
+            return false;
         }
         let bank = mask.trailing_zeros() as usize;
-        if bank < 3 {
-            if bank != self.bank {
-                debug!("G915: bank M{}", bank + 1);
-            }
-            self.bank = bank;
-            self.light(ch, dev);
+        if bank >= 3 || bank == self.bank {
+            return false;
         }
+        debug!("G915: bank M{}", bank + 1);
+        self.bank = bank;
+        true
+    }
+
+    /// G1-G5 in the bank's colour, while blu-ghub has the keys and the
+    /// settings ask for it.
+    pub fn indicator(&self) -> Option<Vec<(u8, Rgb)>> {
+        let g = &self.setup.gkeys;
+        (self.diverted && g.show_bank).then(|| {
+            let colour = g.bank_colors[self.bank.min(2)];
+            ["g1", "g2", "g3", "g4", "g5"]
+                .iter()
+                .filter_map(|n| crate::keymap::by_name(n))
+                .map(|k| (k.zone, colour))
+                .collect()
+        })
     }
 
     fn features(&mut self, ch: &mut Channel, dev: u8) -> anyhow::Result<(u8, u8)> {
@@ -215,9 +229,7 @@ impl Takeover {
         if self.mkeys.is_none() {
             self.mkeys = ch.feature_index(dev, feature::MKEYS).ok().flatten().map(|f| f.0);
         }
-        self.lit = None;
         self.bank_now(ch, dev);
-        self.light(ch, dev);
         Ok(())
     }
 
@@ -234,21 +246,6 @@ impl Takeover {
             }
             Ok(_) => {}
             Err(e) => debug!("G915: which bank: {e}; taking M{}", self.bank + 1),
-        }
-    }
-
-    /// Light the bank's M key, if it is not already.
-    fn light(&mut self, ch: &mut Channel, dev: u8) {
-        let Some(m) = self.mkeys else { return };
-        if self.lit == Some(self.bank) {
-            return;
-        }
-        match ch.request(dev, m, 1, &[1 << self.bank.min(7)]) {
-            Ok(_) => {
-                debug!("G915: asked for the M{} light", self.bank + 1);
-                self.lit = Some(self.bank);
-            }
-            Err(e) => debug!("G915: M light: {e}"),
         }
     }
 
@@ -360,7 +357,6 @@ impl Takeover {
         }
         self.diverted = false;
         self.mask = 0;
-        self.lit = None;
         *taken() = None;
     }
 

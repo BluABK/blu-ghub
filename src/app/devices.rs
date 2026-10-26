@@ -82,6 +82,8 @@ const RELEASE: [u8; 3] = [0x01, 0x00, 0x00];
 /// is handed back and the keyboard shows its stored layout at once.
 struct Painter {
     own: Option<Vec<(u8, Rgb)>>,
+    /// Keys painted over whatever else is shown: the bank on G1-G5.
+    overlay: Option<Vec<(u8, Rgb)>>,
     feat: Option<u8>,
     effects: Option<u8>,
     /// Gave up: a feature missing, or the keyboard refused.
@@ -95,6 +97,7 @@ impl Painter {
     fn new(own: Option<Vec<(u8, Rgb)>>) -> Self {
         Painter {
             own,
+            overlay: None,
             feat: None,
             effects: None,
             failed: false,
@@ -104,7 +107,18 @@ impl Painter {
     }
 
     fn wanted(&self) -> Option<Vec<(u8, Rgb)>> {
-        preview_slot().wanted.clone().or_else(|| self.own.clone())
+        // A preview shows the layout being edited as it is, G-keys included.
+        if let Some(p) = preview_slot().wanted.clone() {
+            return Some(p);
+        }
+        let base = self.own.clone();
+        if base.is_none() && self.overlay.is_none() {
+            return None;
+        }
+        let mut keys: std::collections::BTreeMap<u8, Rgb> =
+            base.unwrap_or_default().into_iter().collect();
+        keys.extend(self.overlay.iter().flatten().copied());
+        Some(keys.into_iter().collect())
     }
 
     /// The keyboard went to sleep or away: the claim and what it showed are
@@ -623,6 +637,7 @@ fn keyboard_loop(
                         s.battery = Some(b);
                     });
                     gkeys.settle(ch, dev);
+                    painter.overlay = gkeys.indicator();
                     painter.paint(ch, dev, name);
                 }
                 // A sleeping keyboard is answered by the receiver: 0x09
@@ -672,7 +687,10 @@ fn keyboard_loop(
                     continue;
                 }
                 if let Some(p) = gkeys.mkey_feature().and_then(|m| event_payload(d, dev, m)) {
-                    gkeys.on_mkeys(ch, dev, p[0]);
+                    if gkeys.on_mkeys(p[0]) {
+                        painter.overlay = gkeys.indicator();
+                        painter.paint(ch, dev, name);
+                    }
                     continue;
                 }
                 let just_read =
@@ -689,6 +707,7 @@ fn keyboard_loop(
                         due = None;
                         painter.forget();
                         gkeys.forget();
+                        painter.overlay = None;
                         rep.update(link, |s| s.state = State::Sleeping);
                     }
                 } else if let Some(p) = battery_idx.and_then(|i| event_payload(d, dev, i)) {

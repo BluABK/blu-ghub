@@ -128,6 +128,10 @@ esc = "#2a6fd4"
 f1 = "#d42a8c"
 logo = "#2a6fd4"
 
+[keyboard.gkeys]
+show_bank = true              # G1-G5 in the bank's colour while blu-ghub has them
+bank_colors = ["#2080ff", "#30d040", "#ff8010"]   # M1, M2, M3
+
 [keyboard.gkeys.m1]           # G1-G5 while M1 is lit; m2, m3 likewise
 g1 = { text = "On my way!" }
 g2 = { media = "play_pause" }
@@ -198,7 +202,11 @@ The M keys come with the G-keys: while blu-ghub has them, M1-M3 switch
 blu-ghub's bank instead of the keyboard's profile, starting from the profile
 the keyboard was on, and their lights stay dark (the keyboard does not show
 them for the host in on-board mode). The keyboard stays on its profile, and
-is back on it, lit, when blu-ghub hands the keys back.
+is back on it, lit, when blu-ghub hands the keys back. With `show_bank`,
+G1-G5 light up in the bank's colour instead, which holds the keyboard's own
+lighting effects off as a layout of blu-ghub's does (no dimming after a
+minute; it still sleeps); the rest of the keyboard shows whichever layout
+is chosen.
 
 Actions: `default`, `off`, `{ text = "..." }` (typed as Unicode, whatever
 the layout; a line break presses Enter), `{ media = "..." }` (the headset
