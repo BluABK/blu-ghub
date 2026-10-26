@@ -53,7 +53,8 @@ never saved over.
 
 **Details** under each device: firmware (and the receiver's), serial number
 and wireless id (masked until *Show* is clicked, so a screenshot can be
-shared; never written to the log), the report interval the receiver
+shared; never written to the log), the report rate (the active on-board
+profile's) and the interval the receiver
 records, the backlight level, the bank in use; for the headset its
 sidetone, the equaliser in Windows (below) and, while blu-ghub has its
 buttons, the microphone's mute and the boom. What cannot change is read

@@ -695,9 +695,16 @@ impl Settings {
                     });
                     ui.end_row();
                 }
+                if let Some(ms) = d.profile_report_ms {
+                    ui.label("Report rate");
+                    ui.label(format!("{ms} ms, {} Hz (the active profile's)", 1000 / ms as u32));
+                    ui.end_row();
+                }
                 if let Some(ms) = d.report_ms {
-                    ui.label("Report interval");
-                    ui.label(format!("{ms} ms (as the receiver records it)"));
+                    ui.label("Receiver's record");
+                    ui.label(format!(
+                        "{ms} ms (its pairing record; Solaar calls it the polling rate)"
+                    ));
                     ui.end_row();
                 }
                 if let Some((now, max)) = d.backlight {
@@ -722,6 +729,8 @@ impl Settings {
                             let text: Vec<String> = row
                                 .iter()
                                 .map(|(hz, db)| {
+                                    // + 0.0: no "-0.0".
+                                    let db = db + 0.0;
                                     format!("{} {db:+.1} dB", super::details::band_name(*hz))
                                 })
                                 .collect();

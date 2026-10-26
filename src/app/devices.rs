@@ -735,7 +735,7 @@ fn keyboard_loop(
                                 super::details::read_keyboard_fixed(ch, dev, wireless)
                             })
                             .clone();
-                        super::details::read_keyboard_live(ch, dev, &mut d);
+                        super::details::read_keyboard_live(ch, dev, &mut d, gkeys.bank_sector());
                         if let Some(b) = gkeys.bank_label() {
                             d.profile = Some(b);
                         }

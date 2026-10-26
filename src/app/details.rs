@@ -19,7 +19,12 @@ pub struct Details {
     pub receiver_firmware: Option<String>,
     pub serial: Option<String>,
     pub wireless_id: Option<String>,
+    /// The receiver's pairing record's byte 2, which Solaar shows as the
+    /// polling rate in ms.
     pub report_ms: Option<u8>,
+    /// The active on-board profile's report rate (its first byte, in ms, as
+    /// libratbag and Solaar read profiles).
+    pub profile_report_ms: Option<u8>,
     /// Current and highest backlight level.
     pub backlight: Option<(u16, u16)>,
     /// The bank in use: "M2", and whose (the keyboard's profile or blu-ghub's).
@@ -115,7 +120,9 @@ pub fn read_keyboard_fixed(ch: &mut Channel, dev: u8, receiver: bool) -> Details
 }
 
 /// The keyboard's backlight and profile, which change.
-pub fn read_keyboard_live(ch: &mut Channel, dev: u8, d: &mut Details) {
+/// `sector`: the profile to read the report rate from, when blu-ghub knows
+/// it (it has the G-keys); otherwise the one the keyboard says is in use.
+pub fn read_keyboard_live(ch: &mut Channel, dev: u8, d: &mut Details, sector: Option<u16>) {
     if let Some(i) = index(ch, dev, feature::BRIGHTNESS)
         && let (Ok(info), Ok(now)) = (ch.request(dev, i, 0, &[]), ch.request(dev, i, 1, &[]))
         && info.len() >= 2
@@ -124,13 +131,31 @@ pub fn read_keyboard_live(ch: &mut Channel, dev: u8, d: &mut Details) {
         d.backlight =
             Some((u16::from_be_bytes([now[0], now[1]]), u16::from_be_bytes([info[0], info[1]])));
     }
+    let Some(o) = index(ch, dev, feature::ONBOARD_PROFILES) else { return };
     // The profile in use, as M1-M3 (its place in the directory).
-    if let Some(o) = index(ch, dev, feature::ONBOARD_PROFILES)
-        && let Ok(cur) = ch.request(dev, o, 4, &[])
-        && cur.len() >= 2
+    let current = match ch.request(dev, o, 4, &[]) {
+        Ok(cur) if cur.len() >= 2 => Some(u16::from_be_bytes([cur[0], cur[1]])),
+        Ok(_) => None,
+        Err(e) => {
+            tracing::debug!("G915: which profile: {e}");
+            None
+        }
+    };
+    if let Some(s) = sector.or(current) {
+        match ch.request(dev, o, 5, &[(s >> 8) as u8, s as u8, 0, 0]) {
+            Ok(head) => {
+                tracing::debug!(
+                    "G915: profile sector {s} starts {}",
+                    crate::diag::hex(&head[..8.min(head.len())])
+                );
+                d.profile_report_ms = head.first().copied().filter(|ms| (1..=32).contains(ms));
+            }
+            Err(e) => tracing::debug!("G915: profile sector {s}: {e}"),
+        }
+    }
+    if let Some(sector) = current
         && let Ok(dir) = ch.request(dev, o, 5, &[0, 0, 0, 0])
     {
-        let sector = u16::from_be_bytes([cur[0], cur[1]]);
         let pos = dir
             .chunks(4)
             .take_while(|e| e.len() == 4 && !(e[0] == 0xFF && e[1] == 0xFF))

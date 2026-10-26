@@ -170,6 +170,12 @@ impl Takeover {
         self.diverted.then(|| format!("M{} (blu-ghub's bank)", self.bank + 1))
     }
 
+    /// The profile sector of blu-ghub's bank, while it has the keys (the
+    /// keyboard may be in host mode, where it names no profile in use).
+    pub fn bank_sector(&self) -> Option<u16> {
+        self.diverted.then(|| self.banks.get(self.bank).copied()).flatten()
+    }
+
     /// The feature index M-key events arrive on while the keys are taken.
     pub fn mkey_feature(&self) -> Option<u8> {
         self.mkeys
