@@ -96,10 +96,12 @@ the receiver), on an M key, or at power-off. Escape is zone 0x26 (HID usage
 0x29 − 3).
 
 **With software control claimed** (0x8071 fn5 set `[01 01 00]`: on, RGB
-clusters only, not power modes), on the cable: the painted Escape stayed
-for well over 90 s idle, and the keyboard did not dim. Not yet seen on the
-receiver, where the keyboard dims and sleeps. fn5 `[01 00 00]` hands the
-lighting back; the keyboard forgets the claim at power-off.
+clusters only, not power modes): the painted Escape stayed for well over
+90 s idle, and the keyboard did not dim, on the cable and on the receiver.
+On the receiver it still went dark (asleep) after about 5 minutes, and woke
+with its own stored layout and effects, dimming after a minute again: sleep
+ends the claim. fn5 `[01 00 00]` hands the lighting back; the keyboard also
+forgets the claim at power-off.
 
 **Effects, 0x8071.** Two clusters (probe):
 

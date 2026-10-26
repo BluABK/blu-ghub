@@ -270,11 +270,6 @@ impl Editor {
     }
 }
 
-/// The layout as (zone, colour), for the keyboard.
-pub fn frame(keys: &BTreeMap<String, Rgb>) -> Vec<(u8, Rgb)> {
-    keys.iter().filter_map(|(k, c)| crate::keymap::by_name(k).map(|key| (key.zone, *c))).collect()
-}
-
 /// The `'static` name of a key in the layout.
 fn name(k: &str) -> Option<&'static str> {
     crate::keymap::by_name(k).map(|key| key.name)

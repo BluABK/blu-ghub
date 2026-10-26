@@ -7,8 +7,9 @@
 //!   as media keys, and with them its microphone mute ([`audio`]). Writes:
 //!   the receiver's own connection notifications, taking the headset's
 //!   buttons over and back, the headset's lighting, and while the G915
-//!   layout editor is open, per-key colours in the keyboard's RAM
-//!   ([`perkey`]; never stored).
+//!   layout editor is open or blu-ghub's layout is to be shown, the
+//!   lighting claimed from the keyboard's own effects and per-key colours
+//!   in its RAM ([`perkey`]; never stored).
 //! - [`diag`]: BluGHub-diag. `caps` reads HID descriptors through handles
 //!   opened with no access rights, `sniff` opens the HID++ collections (and
 //!   with `--headset-all` the headset's others) read-only, `keys` watches

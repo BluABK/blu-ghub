@@ -20,6 +20,7 @@ pub struct Config {
     pub keyboard: Keyboard,
     pub headset: Headset,
     /// For the G-keys, by name.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub macros: Vec<crate::gkeys::Macro>,
 }
 
@@ -30,13 +31,39 @@ pub struct Keyboard {
     pub gkeys: crate::gkeys::GKeys,
 }
 
-/// A per-key layout for the G915, by key name ([`crate::keymap`]). Kept for
-/// the layout editor; nothing sends it to the keyboard yet, which shows the
-/// layout stored in it.
+/// A per-key layout for the G915, by key name ([`crate::keymap`]), and
+/// whether blu-ghub keeps it shown.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct KeyboardLighting {
+    pub show: ShowLayout,
     pub keys: std::collections::BTreeMap<String, crate::lighting::Rgb>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShowLayout {
+    /// The layout stored in the keyboard; blu-ghub sends nothing.
+    #[default]
+    Stored,
+    /// `keys`, painted at every connect and wake with the lighting claimed
+    /// from the keyboard's own effects (in its RAM only).
+    Layout,
+}
+
+impl KeyboardLighting {
+    /// The layout as (zone, colour), for the keyboard.
+    pub fn frame(&self) -> Vec<(u8, crate::lighting::Rgb)> {
+        self.keys
+            .iter()
+            .filter_map(|(k, c)| crate::keymap::by_name(k).map(|key| (key.zone, *c)))
+            .collect()
+    }
+
+    /// What blu-ghub keeps shown: `None` leaves the keyboard to its own.
+    pub fn shown(&self) -> Option<Vec<(u8, crate::lighting::Rgb)>> {
+        (self.show == ShowLayout::Layout && !self.keys.is_empty()).then(|| self.frame())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -213,6 +240,20 @@ mod tests {
         assert_eq!(c.headset.buttons.as_array(), [ButtonAction::Default; 3]);
         assert!(c.keyboard.lighting.keys.is_empty());
         assert_eq!(c.headset.lighting, Default::default());
+    }
+
+    #[test]
+    fn the_stored_layout_is_the_default_and_an_empty_one_is_never_shown() {
+        let c: Config = toml::from_str("[keyboard.lighting.keys]\nesc = \"#102030\"\n").unwrap();
+        assert_eq!(c.keyboard.lighting.show, ShowLayout::Stored);
+        assert_eq!(c.keyboard.lighting.shown(), None);
+        let c: Config = toml::from_str("[keyboard.lighting]\nshow = \"layout\"\n").unwrap();
+        assert_eq!(c.keyboard.lighting.shown(), None);
+        let c: Config = toml::from_str(
+            "[keyboard.lighting]\nshow = \"layout\"\n[keyboard.lighting.keys]\nesc = \"#102030\"\n",
+        )
+        .unwrap();
+        assert_eq!(c.keyboard.lighting.shown().unwrap()[0].0, 0x26);
     }
 
     #[test]

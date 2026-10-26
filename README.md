@@ -66,8 +66,10 @@ matters. Nothing is sent to a sleeping keyboard or a switched-off headset; the
 app waits for them to announce themselves. The writes: turning on the
 receiver's connection notifications if a replug has turned them off (G HUB
 used to do this), taking the headset's buttons and the keyboard's G-keys
-over and back, setting the headset's lighting (below), and, only while the
-layout editor is open, painting the keyboard's keys in its memory. Even
+over and back, setting the headset's lighting (below), and, while the
+layout editor is open or the keyboard is set to show blu-ghub's layout,
+holding the keyboard's own lighting effects off and painting its keys in
+its memory. Even
 with no buttons or G-keys configured, each device gets one hand-back the
 first time it is on, which undoes a takeover left behind by a killed run.
 
@@ -118,6 +120,9 @@ low_battery_percent = 20     # 0 = no warning
 battery_check_minutes = 60   # the fallback reading, 5-1440
 log_retention_days = 14
 
+[keyboard.lighting]
+show = "layout"               # stored (the keyboard's own) or layout (the keys below)
+
 [keyboard.lighting.keys]      # usually imported from G HUB, see below
 esc = "#2a6fd4"
 f1 = "#d42a8c"
@@ -155,21 +160,27 @@ brightness = 60              # 1-100 (steady: the colour is dimmed)
 effect = "off"
 ```
 
-**Keyboard lighting.** The G915 plays a layout stored in itself, and
-blu-ghub leaves it so. `[keyboard.lighting.keys]` is blu-ghub's own layout,
-edited in the settings window's *G915 layout* tab: click a key, Ctrl-click
-or drag to pick more, double-click to pick every key of one colour, then
-choose a colour (picker, `#rrggbb`, or one of the colours in use). *Read G
-HUB's layouts…* reads a copy of `%LOCALAPPDATA%\LGHUB\settings.db` (never
-the file itself), and *Import* starts from the one picked.
+**Keyboard lighting.** The G915 plays a layout stored in itself.
+`[keyboard.lighting.keys]` is blu-ghub's own layout, edited in the settings
+window's *G915 layout* tab: click a key, Ctrl-click or drag to pick more,
+double-click to pick every key of one colour, then choose a colour (picker,
+`#rrggbb`, or one of the colours in use). *Read G HUB's layouts…* reads a
+copy of `%LOCALAPPDATA%\LGHUB\settings.db` (never the file itself), and
+*Import* starts from the one picked.
 
-While that tab is open and the window has the focus, the layout is shown on
-the keyboard: only the keys that changed, at most ten times a second, and
-the whole frame every 20 seconds (the keyboard draws its stored layout over
-it whenever it dims or wakes, without saying so). It is painted into the
-keyboard's memory only, as G HUB does, so nothing is stored: the stored
-layout comes back by itself when the keyboard next dims or sleeps. Storing
-a layout in the keyboard is not done yet.
+`show` picks what the keyboard shows. `stored` (the default): its own
+stored layout, and blu-ghub sends nothing. `layout`: blu-ghub's layout,
+painted whenever the keyboard connects or wakes. blu-ghub then holds the
+keyboard's own effects off (they would draw over painted keys within a
+minute), for the lighting only: the keyboard still sleeps after its five
+minutes, but no longer dims after one. It is painted into the keyboard's
+memory only, so nothing is stored: without blu-ghub running, and for a
+moment at each wake, the keyboard shows its stored layout.
+
+While the *G915 layout* tab is open and the window has the focus, the
+layout being edited is shown on the keyboard, only the keys that changed,
+at most ten times a second. Leaving the tab shows the saved choice again at
+once. Storing a layout in the keyboard itself is not done.
 
 Key names follow the key's position on a US layout (`semicolon` is Ø on a
 Nordic board); the full list is in `src/keymap.rs`.

@@ -39,126 +39,161 @@ pub const QUIT: u8 = 2;
 const PREVIEW: u8 = 3;
 
 /// A layout the settings window wants shown on the keyboard while it is
-/// being edited, as (zone, colour), and the keyboard worker to tell.
+/// being edited, as (zone, colour), and the keyboard workers to tell (one
+/// per link: the receiver's and the cable's).
 struct PreviewSlot {
     wanted: Option<Vec<(u8, Rgb)>>,
-    waker: Option<Waker>,
+    wakers: Vec<(u64, Waker)>,
+    next_id: u64,
 }
 
-static PREVIEW_SLOT: Mutex<PreviewSlot> = Mutex::new(PreviewSlot { wanted: None, waker: None });
+static PREVIEW_SLOT: Mutex<PreviewSlot> =
+    Mutex::new(PreviewSlot { wanted: None, wakers: Vec::new(), next_id: 0 });
 
 fn preview_slot() -> std::sync::MutexGuard<'static, PreviewSlot> {
     PREVIEW_SLOT.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Show `frame` on the keyboard, or stop showing anything (`None`). The
-/// keyboard's worker paints it into the keyboard's RAM only; the layout
-/// stored in the keyboard comes back by itself, at the latest when the
-/// keyboard next dims or sleeps.
+/// Show `frame` on the keyboard, or stop showing it (`None`): the keyboard
+/// then shows blu-ghub's layout if the settings say so, or its own again.
 pub fn preview(frame: Option<Vec<(u8, Rgb)>>) {
     let mut slot = preview_slot();
     if slot.wanted == frame {
         return;
     }
     slot.wanted = frame;
-    if let Some(w) = &slot.waker {
+    for (_, w) in &slot.wakers {
         w.wake(PREVIEW);
     }
 }
 
-/// While a preview is wanted, the whole frame is painted again this often:
-/// the keyboard draws its own layout over it whenever it dims or wakes, and
-/// says nothing when it does.
-const REPAINT: Duration = Duration::from_secs(20);
+/// 0x8071 fn5 set: software control of the RGB clusters on, or off. Never
+/// the power-modes bit (0x02): the keyboard keeps its own sleep.
+const CLAIM: [u8; 3] = [0x01, 0x01, 0x00];
+const RELEASE: [u8; 3] = [0x01, 0x00, 0x00];
 
-/// The keyboard worker's side of the preview.
-#[derive(Default)]
+/// What the keyboard shows besides its own stored layout: the editor's
+/// preview while one is up, else blu-ghub's layout if the settings say so.
+///
+/// Painted with the lighting claimed from the keyboard's own effects, which
+/// otherwise draw over painted keys within a minute (verified), and into
+/// its RAM only. The keyboard forgets the claim when it sleeps, so it is
+/// claimed and painted again at every wake; with nothing to show, the claim
+/// is handed back and the keyboard shows its stored layout at once.
 struct Painter {
+    own: Option<Vec<(u8, Rgb)>>,
     feat: Option<u8>,
-    /// Gave up: no per-key feature, or the keyboard refused.
+    effects: Option<u8>,
+    /// Gave up: a feature missing, or the keyboard refused.
     failed: bool,
-    /// What was last painted, and when the whole frame last was.
+    claimed: bool,
+    /// What was last painted since the claim.
     shown: std::collections::HashMap<u8, Rgb>,
-    full_at: Option<Instant>,
 }
 
 impl Painter {
-    /// When the frame is next due again, if a preview is up.
-    fn due(&self) -> Option<Instant> {
-        (!self.failed && preview_slot().wanted.is_some())
-            .then(|| self.full_at.map_or_else(Instant::now, |t| t + REPAINT))
+    fn new(own: Option<Vec<(u8, Rgb)>>) -> Self {
+        Painter {
+            own,
+            feat: None,
+            effects: None,
+            failed: false,
+            claimed: false,
+            shown: Default::default(),
+        }
     }
 
-    /// The keyboard went to sleep or away: what it showed is gone.
+    fn wanted(&self) -> Option<Vec<(u8, Rgb)>> {
+        preview_slot().wanted.clone().or_else(|| self.own.clone())
+    }
+
+    /// The keyboard went to sleep or away: the claim and what it showed are
+    /// gone.
     fn forget(&mut self) {
         self.shown.clear();
-        self.full_at = None;
+        self.claimed = false;
+    }
+
+    fn features(&mut self, ch: &mut Channel, dev: u8, name: &str) -> Option<(u8, u8)> {
+        let mut find = |id: u16, what: &str| match ch.feature_index(dev, id) {
+            Ok(Some((f, _, _))) => Some(f),
+            Ok(None) => {
+                warn!("{name}: no {what} feature; no layout of blu-ghub's");
+                None
+            }
+            Err(e) => {
+                debug!("{name}: lighting: {e}");
+                None
+            }
+        };
+        if self.feat.is_none() {
+            self.feat = find(feature::PER_KEY_LIGHTING_V2, "per-key lighting");
+            self.failed |= self.feat.is_none();
+        }
+        if self.effects.is_none() && self.feat.is_some() {
+            self.effects = find(feature::RGB_EFFECTS, "RGB effects");
+            self.failed |= self.effects.is_none();
+        }
+        self.feat.zip(self.effects)
+    }
+
+    /// Hand the lighting back to the keyboard's own effects.
+    fn release(&mut self, ch: &mut Channel, dev: u8, name: &str) {
+        if self.claimed
+            && let Some(fx) = self.effects
+        {
+            match ch.request(dev, fx, 5, &RELEASE) {
+                Ok(_) => debug!("{name}: lighting handed back"),
+                Err(e) => debug!("{name}: handing the lighting back: {e}"),
+            }
+        }
+        self.forget();
     }
 
     fn paint(&mut self, ch: &mut Channel, dev: u8, name: &str) {
-        let Some(wanted) = preview_slot().wanted.clone() else {
-            self.forget();
-            return;
-        };
         if self.failed {
             return;
         }
-        let feat = match self.feat {
-            Some(f) => f,
-            None => match ch.feature_index(dev, feature::PER_KEY_LIGHTING_V2) {
-                Ok(Some((f, _, _))) => *self.feat.insert(f),
-                Ok(None) => {
-                    warn!("{name}: no per-key lighting feature; no preview");
-                    self.failed = true;
-                    return;
+        let Some(wanted) = self.wanted() else {
+            self.release(ch, dev, name);
+            return;
+        };
+        let Some((feat, fx)) = self.features(ch, dev, name) else { return };
+        // The keyboard drops the first frame after a claim (seen in E7 and
+        // again here): a fresh claim gets the whole frame twice.
+        let fresh = !self.claimed;
+        if !self.claimed {
+            match ch.request(dev, fx, 5, &CLAIM) {
+                Ok(_) => {
+                    debug!("{name}: lighting claimed");
+                    self.claimed = true;
+                    self.shown.clear();
                 }
                 Err(e) => {
-                    debug!("{name}: preview: {e}");
+                    warn!("{name}: could not claim the lighting: {e}");
+                    self.failed = matches!(e, HidppError::Error20(_));
                     return;
                 }
-            },
-        };
-        let full = self.full_at.is_none_or(|t| t.elapsed() >= REPAINT);
-        let changes: Vec<(u8, Rgb)> = if full {
-            wanted.clone()
-        } else {
-            wanted.iter().copied().filter(|(z, c)| self.shown.get(z) != Some(c)).collect()
-        };
+            }
+        }
+        let changes: Vec<(u8, Rgb)> =
+            wanted.iter().copied().filter(|(z, c)| self.shown.get(z) != Some(c)).collect();
         if changes.is_empty() {
             return;
         }
         let started = Instant::now();
         let requests = perkey::requests(&changes);
-        for (func, params) in &requests {
-            match ch.request(dev, feat, *func, params) {
-                // fn1 echoes its zones, FF for one it did not take.
-                Ok(r) if *func == perkey::SET_ZONES => {
-                    for (sent, got) in params.chunks(4).zip(r.chunks(4)) {
-                        if sent.len() == 4 && got.first() == Some(&0xFF) {
-                            debug!("{name}: preview: zone {:#04x} refused", sent[0]);
-                        }
-                    }
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    warn!("{name}: preview stopped: {e}");
-                    self.failed = matches!(e, HidppError::Error20(_));
-                    self.forget();
-                    return;
-                }
+        for _ in 0..if fresh { 2 } else { 1 } {
+            if let Err(e) = send_frame(ch, dev, feat, &requests, name) {
+                warn!("{name}: painting stopped: {e}");
+                self.failed = matches!(e, HidppError::Error20(_));
+                self.shown.clear();
+                return;
             }
         }
-        if let Err(e) = ch.request(dev, feat, perkey::FRAME_END, &perkey::FRAME_END_RAM) {
-            warn!("{name}: preview stopped: {e}");
-            self.forget();
-            return;
-        }
         self.shown = wanted.into_iter().collect();
-        if full {
-            self.full_at = Some(Instant::now());
-        }
         debug!(
-            "{name}: preview: {} keys in {} requests, {} ms",
+            "{name}: painted {} keys in {} requests, {} ms",
             changes.len(),
             requests.len() + 1,
             started.elapsed().as_millis()
@@ -166,12 +201,46 @@ impl Painter {
     }
 }
 
-/// Unregisters the keyboard worker from previews when it ends.
-struct PreviewWorker;
+/// One frame: the requests, then the frame end (RAM only).
+fn send_frame(
+    ch: &mut Channel,
+    dev: u8,
+    feat: u8,
+    requests: &[(u8, Vec<u8>)],
+    name: &str,
+) -> Result<(), HidppError> {
+    for (func, params) in requests {
+        let r = ch.request(dev, feat, *func, params)?;
+        // fn1 echoes its zones, FF for one it did not take.
+        if *func == perkey::SET_ZONES {
+            for (sent, got) in params.chunks(4).zip(r.chunks(4)) {
+                if sent.len() == 4 && got.first() == Some(&0xFF) {
+                    debug!("{name}: lighting: zone {:#04x} refused", sent[0]);
+                }
+            }
+        }
+    }
+    ch.request(dev, feat, perkey::FRAME_END, &perkey::FRAME_END_RAM)?;
+    Ok(())
+}
+
+/// Registers a keyboard worker for previews, and unregisters it when it
+/// ends.
+struct PreviewWorker(u64);
+
+impl PreviewWorker {
+    fn register(w: Waker) -> Self {
+        let mut slot = preview_slot();
+        let id = slot.next_id;
+        slot.next_id += 1;
+        slot.wakers.push((id, w));
+        PreviewWorker(id)
+    }
+}
 
 impl Drop for PreviewWorker {
     fn drop(&mut self) {
-        preview_slot().waker = None;
+        preview_slot().wakers.retain(|(id, _)| *id != self.0);
     }
 }
 
@@ -375,6 +444,14 @@ fn enable_link_notifications(ch: &mut Channel) {
     }
 }
 
+/// What the keyboard's worker does besides the battery.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct KeyboardSetup {
+    pub gkeys: super::keyboard_gkeys::Setup,
+    /// blu-ghub's layout, to keep shown; `None`: the keyboard's own.
+    pub layout: Option<Vec<(u8, Rgb)>>,
+}
+
 /// Start a worker for `link` if its hardware is among `all`.
 pub fn start(
     link: Link,
@@ -382,7 +459,7 @@ pub fn start(
     rep: Reporter,
     poll: Duration,
     headset_config: crate::config::Headset,
-    keyboard_setup: super::keyboard_gkeys::Setup,
+    keyboard_setup: KeyboardSetup,
 ) -> Option<Worker> {
     let (pid, label) = match link {
         Link::KeyboardReceiver => (0xC547, "G915 receiver"),
@@ -481,12 +558,14 @@ fn keyboard(
     dev: u8,
     rep: &Reporter,
     poll: Duration,
-    setup: super::keyboard_gkeys::Setup,
+    setup: KeyboardSetup,
 ) {
-    let mut gkeys = super::keyboard_gkeys::Takeover::new(setup);
-    keyboard_loop(&mut ch, link, dev, rep, poll, &mut gkeys);
-    // However the loop ended: hand the G-keys back.
+    let mut gkeys = super::keyboard_gkeys::Takeover::new(setup.gkeys);
+    let mut painter = Painter::new(setup.layout);
+    keyboard_loop(&mut ch, link, dev, rep, poll, &mut gkeys, &mut painter);
+    // However the loop ended: hand the G-keys and the lighting back.
     gkeys.release(&mut ch, dev);
+    painter.release(&mut ch, dev, link.label());
 }
 
 fn keyboard_loop(
@@ -496,6 +575,7 @@ fn keyboard_loop(
     rep: &Reporter,
     poll: Duration,
     gkeys: &mut super::keyboard_gkeys::Takeover,
+    painter: &mut Painter,
 ) {
     let name = link.label();
     let wireless = link == Link::KeyboardReceiver;
@@ -503,9 +583,7 @@ fn keyboard_loop(
         enable_link_notifications(ch);
     }
     rep.update(link, |s| s.state = State::Sleeping);
-    preview_slot().waker = Some(ch.waker());
-    let _unregister = PreviewWorker;
-    let mut painter = Painter::default();
+    let _registered = PreviewWorker::register(ch.waker());
     // Feature indices, looked up once the keyboard answers.
     let mut battery_idx: Option<u8> = None;
     let mut status_idx: Option<u8> = None;
@@ -545,6 +623,7 @@ fn keyboard_loop(
                         s.battery = Some(b);
                     });
                     gkeys.settle(ch, dev);
+                    painter.paint(ch, dev, name);
                 }
                 // A sleeping keyboard is answered by the receiver: 0x09
                 // "resource error", or 0x08 "unknown device" once the link is
@@ -568,23 +647,12 @@ fn keyboard_loop(
             }
         }
 
-        let mut timeout = wait_for(connected, due, poll);
-        if connected && let Some(at) = painter.due() {
-            let left = at.saturating_duration_since(Instant::now());
-            timeout = Some(timeout.map_or(left, |t| t.min(left)));
-        }
-        match ch.wait_event(timeout) {
+        match ch.wait_event(wait_for(connected, due, poll)) {
             Err(e) => {
                 info!("{name}: {e}");
                 return;
             }
-            Ok(None) => {
-                let now = Instant::now() + Duration::from_millis(50);
-                need_read = connected && due.is_none_or(|d| d <= now);
-                if connected && painter.due().is_some_and(|d| d <= now) {
-                    painter.paint(ch, dev, name);
-                }
-            }
+            Ok(None) => need_read = connected,
             Ok(Some(Event::Control(QUIT))) => return,
             Ok(Some(Event::Control(PREVIEW))) => {
                 if connected {

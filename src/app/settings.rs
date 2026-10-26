@@ -28,7 +28,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use super::devices::{Device, Shared, State, Status};
 use super::keyboard_editor;
-use crate::config::Config;
+use crate::config::{Config, ShowLayout};
 use crate::ghub_import;
 use crate::gkeys::GAction;
 use crate::input::ButtonAction;
@@ -353,7 +353,7 @@ impl eframe::App for Settings {
         let keys = &self.draft.keyboard.lighting.keys;
         let wanted =
             (self.tab == Tab::Keyboard && self.editor.preview && focused && !keys.is_empty())
-                .then(|| keyboard_editor::frame(keys));
+                .then(|| self.draft.keyboard.lighting.frame());
         self.editor.send_preview(ui.ctx(), wanted);
     }
 }
@@ -399,12 +399,34 @@ impl Settings {
         if self.draft.keyboard.lighting.keys.is_empty() {
             ui.label("No layout of blu-ghub's own yet: import one from G HUB to start from.");
         }
+        let l = &mut self.draft.keyboard.lighting;
         ui.horizontal(|ui| {
-            ui.checkbox(&mut self.editor.preview, "Show it on the keyboard while editing")
+            ui.strong("The keyboard shows:");
+            ui.radio_value(&mut l.show, ShowLayout::Stored, "its stored layout")
+                .on_hover_text("blu-ghub sends the keyboard nothing.");
+            ui.radio_value(&mut l.show, ShowLayout::Layout, "this layout").on_hover_text(
+                "Painted whenever the keyboard connects or wakes, into its memory only, with \
+                 its own effects held off meanwhile (it still sleeps after its 5 minutes, but \
+                 does not dim after 1). Without blu-ghub running, the keyboard shows its stored \
+                 layout.",
+            );
+        });
+        let saved = self.saved.keyboard.lighting.show;
+        let note = match (saved, l.show) {
+            (ShowLayout::Stored, ShowLayout::Stored) => {
+                "Away from this tab the keyboard shows its stored layout, not this one."
+            }
+            (ShowLayout::Layout, ShowLayout::Layout) => {
+                "The keyboard shows this layout as last saved, also with this window closed."
+            }
+            _ => "Save to make the keyboard keep this choice.",
+        };
+        ui.label(egui::RichText::new(note).weak());
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.editor.preview, "Show the changes on the keyboard while editing")
                 .on_hover_text(
-                    "Painted into the keyboard's memory only, while this window has the \
-                     focus. The layout stored in the keyboard comes back by itself (when it \
-                     dims or sleeps, or after a power cycle); nothing is stored.",
+                    "While this tab is open and the window has the focus. Painted into the \
+                     keyboard's memory only; leaving the tab shows the saved choice again.",
                 );
         });
         ui.add_space(4.0);

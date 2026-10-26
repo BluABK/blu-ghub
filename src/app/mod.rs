@@ -815,9 +815,12 @@ impl App {
             }
             let rep = Reporter { shared: self.shared.clone(), hwnd: self.hwnd.0 as isize };
             let headset = self.config.headset.clone();
-            let keyboard = keyboard_gkeys::Setup {
-                gkeys: self.config.keyboard.gkeys.clone(),
-                macros: self.config.macros.clone(),
+            let keyboard = devices::KeyboardSetup {
+                gkeys: keyboard_gkeys::Setup {
+                    gkeys: self.config.keyboard.gkeys.clone(),
+                    macros: self.config.macros.clone(),
+                },
+                layout: self.config.keyboard.lighting.shown(),
             };
             if let Some(w) = devices::start(link, &all, rep, poll, headset, keyboard) {
                 self.workers.push(w);
@@ -872,8 +875,9 @@ impl App {
         let old = std::mem::replace(&mut self.config, new);
         let poll = old.settings.battery_check_minutes != self.config.settings.battery_check_minutes;
         let buttons = old.headset != self.config.headset;
-        let gkeys =
-            old.keyboard.gkeys != self.config.keyboard.gkeys || old.macros != self.config.macros;
+        let gkeys = old.keyboard.gkeys != self.config.keyboard.gkeys
+            || old.macros != self.config.macros
+            || old.keyboard.lighting.shown() != self.config.keyboard.lighting.shown();
         info!(
             "settings saved{}",
             if poll || buttons || gkeys { "; restarting workers" } else { "" }
