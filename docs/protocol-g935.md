@@ -96,9 +96,24 @@ never forced, as the headset has already muted itself.
 
 ## Sidetone 0x8300 and equaliser 0x8310
 
-Sidetone fn0 → level 0-100 (probe: 0). Equaliser: 10 bands (32 Hz-16 kHz),
-±12 dB (probe: all 0). Setting either is never done without an explicit user
-action.
+Sidetone fn0 → level 0-100 (probe: 0); fn1 `[level]` sets it (verified, heard
+at once). Equaliser: fn0 info `[count 0A, range 0C, caps 01]` (10 bands,
+±12 dB), fn1 `[start]` → an echo of `start`, then 2-byte frequencies (32 Hz
+to 16 kHz), fn2 `[00]` → one signed gain byte a band **from the first byte**,
+fn3 `[02, gains...]` sets them (Solaar's layout; verified by reading back).
+
+**The headset's equaliser does not shape what Windows plays.** A gain set
+with fn3 reads back, but is not heard. The G935's playback endpoint goes
+through Logitech's audio processing in Windows ("Logitech HX2E Surround
+Sound Effect", attached by G HUB's audio driver `lgAudio_G935`), which has a
+10-band equaliser of its own: effect property
+`{42d67d07-c2b8-47f7-8783-109668632ec6},0`, a blob of 10 band frequencies
+(40, 72, 212, 444, 1183, 2658, 5107, 8610, 11408, 12507 Hz), 10 gains (dB)
+and 10 Q values (0.7), little-endian `f32`, then 40 bytes (`01`, zeros, `02`).
+Set through the audio policy service (IPolicyConfig::SetPropertyValue on the
+effect store), as the Sound control panel sets effects, without
+administrator rights; heard from the next stream start (stop and play, not
+pause). The blob passed must be COM memory: the service frees it.
 
 ## Sources
 
