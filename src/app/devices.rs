@@ -39,6 +39,44 @@ pub const QUIT: u8 = 2;
 const PREVIEW: u8 = 3;
 /// The keyboard's worker: new settings wait in its update slot.
 const UPDATE: u8 = 4;
+/// The headset's worker: the wanted equaliser preview changed.
+const EQ_PREVIEW: u8 = 5;
+
+/// The equaliser the settings window wants heard while it is being edited,
+/// and the headset worker to tell.
+struct EqSlot {
+    wanted: Option<Vec<f32>>,
+    waker: Option<Waker>,
+}
+
+static EQ_SLOT: Mutex<EqSlot> = Mutex::new(EqSlot { wanted: None, waker: None });
+
+fn eq_slot() -> std::sync::MutexGuard<'static, EqSlot> {
+    EQ_SLOT.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Have Windows play the headset with these gains, or (`None`) go back to
+/// the saved equaliser, or the one found when none is saved. Written only
+/// when it changes what Windows has; heard from the next playback start.
+pub fn preview_eq(gains: Option<Vec<f32>>) {
+    let mut slot = eq_slot();
+    if slot.wanted == gains {
+        return;
+    }
+    slot.wanted = gains;
+    if let Some(w) = &slot.waker {
+        w.wake(EQ_PREVIEW);
+    }
+}
+
+/// Unregisters the headset worker from equaliser previews when it ends.
+struct EqWorker;
+
+impl Drop for EqWorker {
+    fn drop(&mut self) {
+        eq_slot().waker = None;
+    }
+}
 
 /// New settings for a running keyboard worker.
 type UpdateSlot = Arc<Mutex<Option<KeyboardSetup>>>;
@@ -338,11 +376,12 @@ pub struct LinkStatus {
     pub state: State,
     /// The last reading, kept while the device sleeps.
     pub battery: Option<Battery>,
+    pub details: super::details::Details,
 }
 
 impl Default for LinkStatus {
     fn default() -> Self {
-        Self { state: State::Absent, battery: None }
+        Self { state: State::Absent, battery: None, details: Default::default() }
     }
 }
 
@@ -563,14 +602,7 @@ pub fn start(
                 Link::KeyboardReceiver | Link::KeyboardCable => {
                     keyboard(ch, link, dev, &rep, poll, keyboard_setup, worker_updates)
                 }
-                Link::Headset => headset(
-                    ch,
-                    &rep,
-                    poll,
-                    headset_config.buttons.as_array(),
-                    headset_config.lighting,
-                    mic.unwrap_or_default(),
-                ),
+                Link::Headset => headset(ch, &rep, poll, headset_config, mic.unwrap_or_default()),
             }
             rep.update(link, |s| s.state = State::Absent);
             info!("{}: worker stopped", link.label());
@@ -612,6 +644,8 @@ struct KeyboardParts {
     gkeys: super::keyboard_gkeys::Takeover,
     painter: Painter,
     updates: UpdateSlot,
+    /// The details that do not change, once read.
+    fixed: Option<super::details::Details>,
 }
 
 fn keyboard(
@@ -627,6 +661,7 @@ fn keyboard(
         gkeys: super::keyboard_gkeys::Takeover::new(setup.gkeys),
         painter: Painter::new(setup.layout),
         updates,
+        fixed: None,
     };
     keyboard_loop(&mut ch, link, dev, rep, poll, &mut parts);
     // However the loop ended: hand the G-keys and the lighting back.
@@ -642,7 +677,9 @@ fn keyboard_loop(
     poll: Duration,
     parts: &mut KeyboardParts,
 ) {
-    let KeyboardParts { gkeys, painter, updates } = parts;
+    let KeyboardParts { gkeys, painter, updates, fixed } = parts;
+    // The details were read since the keyboard last connected.
+    let mut details_read = false;
     let name = link.label();
     let wireless = link == Link::KeyboardReceiver;
     if wireless {
@@ -691,6 +728,19 @@ fn keyboard_loop(
                     gkeys.settle(ch, dev);
                     painter.overlay = gkeys.indicator();
                     painter.paint(ch, dev, name);
+                    if !details_read {
+                        details_read = true;
+                        let mut d = fixed
+                            .get_or_insert_with(|| {
+                                super::details::read_keyboard_fixed(ch, dev, wireless)
+                            })
+                            .clone();
+                        super::details::read_keyboard_live(ch, dev, &mut d);
+                        if let Some(b) = gkeys.bank_label() {
+                            d.profile = Some(b);
+                        }
+                        rep.update(link, |s| s.details = d);
+                    }
                 }
                 // A sleeping keyboard is answered by the receiver: 0x09
                 // "resource error", or 0x08 "unknown device" once the link is
@@ -757,6 +807,9 @@ fn keyboard_loop(
                     if gkeys.on_mkeys(ch, dev, p[0]) {
                         painter.overlay = gkeys.indicator();
                         painter.paint(ch, dev, name);
+                        if let Some(b) = gkeys.bank_label() {
+                            rep.update(link, |s| s.details.profile = Some(b));
+                        }
                     }
                     continue;
                 }
@@ -775,6 +828,7 @@ fn keyboard_loop(
                         painter.forget();
                         gkeys.forget();
                         painter.overlay = None;
+                        details_read = false;
                         rep.update(link, |s| s.state = State::Sleeping);
                     }
                 } else if let Some(p) = battery_idx.and_then(|i| event_payload(d, dev, i)) {
@@ -1220,6 +1274,59 @@ impl Buttons {
     }
 }
 
+/// The equaliser Windows plays the headset through: where it is, what it
+/// was when found, and what it is now.
+struct WinEq {
+    endpoint: String,
+    freqs: Vec<f32>,
+    own: Vec<f32>,
+    now: Vec<f32>,
+}
+
+impl WinEq {
+    fn find(container: Option<GUID>) -> Option<WinEq> {
+        match crate::audio_fx::find_eq(container?) {
+            Ok(Some((endpoint, eq))) => Some(WinEq {
+                endpoint,
+                freqs: eq.freqs.to_vec(),
+                own: eq.gains.to_vec(),
+                now: eq.gains.to_vec(),
+            }),
+            Ok(None) => {
+                debug!("G935: no Logitech equaliser on its playback endpoint");
+                None
+            }
+            Err(e) => {
+                debug!("G935: equaliser: {e:#}");
+                None
+            }
+        }
+    }
+
+    /// Write `target` unless Windows has it already. `true` if written.
+    fn apply(&mut self, target: Option<Vec<f32>>) -> bool {
+        let Some(t) = target else { return false };
+        if t == self.now {
+            return false;
+        }
+        match crate::audio_fx::set_gains(&self.endpoint, &t) {
+            Ok(eq) => {
+                debug!("G935: equaliser set to {:?}", eq.gains);
+                self.now = eq.gains.to_vec();
+                true
+            }
+            Err(e) => {
+                warn!("G935: could not set the equaliser: {e:#}");
+                false
+            }
+        }
+    }
+
+    fn bands(&self) -> Vec<(f32, f32)> {
+        self.freqs.iter().copied().zip(self.now.iter().copied()).collect()
+    }
+}
+
 /// The headset's configured lighting, written at every power-on: it
 /// cannot store an effect.
 struct Lights {
@@ -1266,15 +1373,31 @@ fn headset(
     mut ch: Channel,
     rep: &Reporter,
     poll: Duration,
-    actions: [ButtonAction; 3],
-    lighting: HeadsetLighting,
+    config: crate::config::Headset,
     setup: MicSetup,
 ) {
+    let actions = config.buttons.as_array();
+    let lighting = config.lighting;
+    // Details: those that do not change, once read; the rest since the
+    // last power-on; and whether blu-ghub handled the mute when last said.
+    let mut fixed: Option<super::details::Details> = None;
+    let mut details_read = false;
+    let mut handled_said: Option<bool> = None;
+    eq_slot().waker = Some(ch.waker());
+    let _eq = EqWorker;
     let link = Link::Headset;
     let dev = RECEIVER;
     let _taken = ClearTaken;
     rep.update(link, |s| s.state = State::Sleeping);
     let _com = Com::init().map_err(|e| warn!("G935: COM: {e:#}")).ok();
+    // Windows' equaliser for the headset: set to the saved one if it has
+    // another, whether the headset is on or not.
+    let mut win_eq = WinEq::find(setup.container);
+    if let Some(eq) = &mut win_eq {
+        eq.apply(eq_slot().wanted.clone().or_else(|| config.equaliser.clone()));
+        let bands = eq.bands();
+        rep.update(link, |s| s.details.eq = Some(bands));
+    }
     let listening = match &setup.telephony {
         Some(t) => {
             ch.listen(t).map_err(|e| warn!("G935: cannot read the mute button: {e:#}")).is_ok()
@@ -1358,9 +1481,49 @@ fn headset(
             // and the button takeover takes most of a second.
             lights.settle(&mut ch, dev);
             buttons.settle(&mut ch, dev);
+            if !details_read {
+                details_read = true;
+                if let Some(level) = config.sidetone.map(|s| s.applied()) {
+                    match super::details::set_sidetone(&mut ch, dev, level) {
+                        Ok(()) => debug!("G935: sidetone {level}"),
+                        Err(e) => warn!("G935: could not set the sidetone: {e:#}"),
+                    }
+                }
+                let mut d = fixed
+                    .get_or_insert_with(|| super::details::read_headset_fixed(&mut ch, dev))
+                    .clone();
+                super::details::read_headset_live(&mut ch, dev, &mut d);
+                rep.update(link, |s| {
+                    // What the buttons have told so far stays, and the
+                    // equaliser (Windows', not the headset's).
+                    d.mic_handled = s.details.mic_handled;
+                    d.mic_muted = s.details.mic_muted;
+                    d.boom_up = s.details.boom_up;
+                    d.eq = s.details.eq.take();
+                    s.details = d;
+                });
+            }
+            // Whether blu-ghub has the mute, and Windows' state of it.
+            if handled_said != Some(buttons.diverted) {
+                handled_said = Some(buttons.diverted);
+                let muted = if buttons.diverted {
+                    buttons.mic().ok().and_then(|m| m.muted().ok())
+                } else {
+                    None
+                };
+                let handled = buttons.diverted;
+                rep.update(link, |s| {
+                    s.details.mic_handled = handled;
+                    s.details.mic_muted = muted;
+                    if !handled {
+                        s.details.boom_up = None;
+                    }
+                });
+            }
         } else {
             buttons.forget();
             lights.reset();
+            details_read = false;
         }
 
         let mut timeout = wait_for(on, due, poll);
@@ -1388,6 +1551,19 @@ fn headset(
             Ok(Some(Event::Control(QUIT))) => {
                 buttons.release(&mut ch, dev);
                 return;
+            }
+            Ok(Some(Event::Control(EQ_PREVIEW))) => {
+                if let Some(eq) = &mut win_eq {
+                    let target = eq_slot()
+                        .wanted
+                        .clone()
+                        .or_else(|| config.equaliser.clone())
+                        .or_else(|| Some(eq.own.clone()));
+                    if eq.apply(target) {
+                        let bands = eq.bands();
+                        rep.update(link, |s| s.details.eq = Some(bands));
+                    }
+                }
             }
             Ok(Some(Event::Control(_))) => {
                 buttons.invalidate();
@@ -1421,6 +1597,17 @@ fn headset(
                     let acted = match buttons.on_mic(req) {
                         Ok(muted) => {
                             info!("G935: microphone {}", if muted { "muted" } else { "on" });
+                            let boom = match req {
+                                MicRequest::Mute => Some(true),
+                                MicRequest::Unmute => Some(false),
+                                MicRequest::Toggle => None,
+                            };
+                            rep.update(link, |s| {
+                                s.details.mic_muted = Some(muted);
+                                if boom.is_some() {
+                                    s.details.boom_up = boom;
+                                }
+                            });
                             true
                         }
                         Err(e) => {

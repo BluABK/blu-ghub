@@ -77,7 +77,7 @@ pub fn container_of_interface(path: &str) -> Result<GUID> {
     Ok(container)
 }
 
-fn container_of_instance(id: PCWSTR) -> Result<GUID> {
+pub fn container_of_instance(id: PCWSTR) -> Result<GUID> {
     let mut node = 0u32;
     let cr = unsafe { CM_Locate_DevNodeW(&mut node, id, CM_LOCATE_DEVNODE_NORMAL) };
     if cr != CR_SUCCESS {

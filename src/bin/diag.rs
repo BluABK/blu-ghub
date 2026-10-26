@@ -22,6 +22,8 @@ fn usage() -> &'static str {
      BluGHub-diag restore-sector SECTOR FILE put a saved sector back\n\n\
      Lighting (nothing stored; a power cycle undoes it):\n  \
      BluGHub-diag light-test [--claim]       paint Escape red over the stored layout\n\n\
+     The headset's sound in Windows (Logitech's audio processing; nothing sent to it):\n  \
+     BluGHub-diag apo-eq [set G1 .. G10 | restore FILE]   its equaliser\n\n\
      The keyboard's mode (asks before switching; switches back on Enter):\n  \
      BluGHub-diag host-test [--leave]        try host mode, then back to on-board\n  \
      BluGHub-diag host-test --divert         the same with the G-keys taken, and 90 s idle\n  \
@@ -85,6 +87,7 @@ fn main() -> Result<()> {
         ["sniff"] => blu_ghub::diag::sniff::run(minutes, headset_all),
         ["light-test"] => blu_ghub::diag::light::run(claim),
         ["slots"] => blu_ghub::diag::slots::run(),
+        ["apo-eq", more @ ..] => blu_ghub::diag::apo::run(more),
         ["host-test"] if restore && (leave || divert) => {
             bail!("--restore goes on its own")
         }

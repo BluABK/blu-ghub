@@ -28,7 +28,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use super::devices::{Device, Shared, State, Status};
 use super::keyboard_editor;
-use crate::config::{Config, ShowLayout};
+use crate::config::{Config, ShowLayout, Sidetone};
 use crate::ghub_import;
 use crate::gkeys::GAction;
 use crate::input::ButtonAction;
@@ -164,7 +164,7 @@ pub fn run(editing: Editing, auto_close: Option<Duration>) -> Result<bool> {
         wgpu_options: wgpu_options(),
         viewport: egui::ViewportBuilder::default()
             .with_title("BluGHub")
-            .with_inner_size([520.0, 680.0])
+            .with_inner_size([860.0, 640.0])
             .with_min_inner_size([400.0, 300.0])
             // An empty icon turns eframe's icon handling off; see above.
             .with_icon(egui::IconData::default())
@@ -235,6 +235,11 @@ struct Settings {
     editor: keyboard_editor::Editor,
     /// The M bank shown in the G-key section.
     gkey_bank: usize,
+    /// Serial numbers and wireless ids shown unmasked, until the window
+    /// closes.
+    show_ids: bool,
+    /// The equaliser band being dragged.
+    eq_drag: Option<usize>,
     macro_editor: super::macro_editor::MacroEditor,
     /// An open file dialog: for which (bank, key), and its answer.
     browsing: Option<((usize, usize), FileAnswer)>,
@@ -262,9 +267,11 @@ impl Settings {
             hex: Default::default(),
             ghub: None,
             ghub_pick: 0,
-            tab: Tab::Settings,
+            tab: Tab::Overview,
             editor: Default::default(),
             gkey_bank: 0,
+            show_ids: false,
+            eq_drag: None,
             macro_editor: Default::default(),
             browsing: None,
             opened: Instant::now(),
@@ -280,6 +287,7 @@ impl Settings {
 impl Drop for Settings {
     fn drop(&mut self) {
         super::devices::preview(None);
+        super::devices::preview_eq(None);
         let times: Vec<String> = self.frame_times.iter().map(|t| format!("{t:.1}")).collect();
         tracing::debug!(
             "settings window closed after {:.1} s: {} passes, {} painted (at {} s; asked for \
@@ -326,15 +334,14 @@ impl eframe::App for Settings {
         egui::CentralPanel::default().show(ui, |ui| {
             let before = self.tab;
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.tab, Tab::Settings, "Settings");
-                ui.selectable_value(
-                    &mut self.tab,
-                    Tab::Keyboard,
-                    format!("{} layout", Device::Keyboard.label()),
-                );
+                let kb = Device::Keyboard.label();
+                ui.selectable_value(&mut self.tab, Tab::Overview, "Overview");
+                ui.selectable_value(&mut self.tab, Tab::GKeys, format!("{kb} G-keys"));
+                ui.selectable_value(&mut self.tab, Tab::Layout, format!("{kb} layout"));
                 ui.selectable_value(&mut self.tab, Tab::Macros, "Macros");
+                ui.selectable_value(&mut self.tab, Tab::Headset, Device::Headset.label());
             });
-            if self.tab == Tab::Keyboard && before != Tab::Keyboard {
+            if self.tab == Tab::Layout && before != Tab::Layout {
                 // Room for the keyboard drawing.
                 let size = ui.ctx().input(|i| i.viewport().inner_rect).map(|r| r.size());
                 if let Some(s) = size
@@ -348,8 +355,29 @@ impl eframe::App for Settings {
             }
             ui.separator();
             egui::ScrollArea::vertical().show(ui, |ui| match self.tab {
-                Tab::Settings => self.settings_tab(ui, &status),
-                Tab::Keyboard => {
+                Tab::Overview => {
+                    self.overview_tab(ui, &status);
+                    ui.add_space(12.0);
+                    self.save_row(ui);
+                }
+                Tab::GKeys => {
+                    self.keyboard_gkeys(ui);
+                    ui.add_space(12.0);
+                    self.save_row(ui);
+                }
+                Tab::Headset => {
+                    ui.columns(2, |c| {
+                        self.headset_buttons(&mut c[0]);
+                        c[0].add_space(12.0);
+                        self.headset_sound(&mut c[0]);
+                        self.headset_lighting(&mut c[1]);
+                    });
+                    ui.add_space(12.0);
+                    self.headset_eq(ui, &status);
+                    ui.add_space(12.0);
+                    self.save_row(ui);
+                }
+                Tab::Layout => {
                     self.keyboard_lighting(ui);
                     ui.add_space(8.0);
                     self.editor.show(ui, &mut self.draft.keyboard.lighting.keys);
@@ -369,7 +397,7 @@ impl eframe::App for Settings {
         // shows what Save will give.
         let focused = ui.ctx().input(|i| i.viewport().focused).unwrap_or(true);
         let l = &self.draft.keyboard.lighting;
-        let wanted = (self.tab == Tab::Keyboard
+        let wanted = (self.tab == Tab::Layout
             && self.editor.preview
             && focused
             && l.show == ShowLayout::Layout
@@ -381,32 +409,31 @@ impl eframe::App for Settings {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
-    Settings,
-    Keyboard,
+    /// Both devices side by side, with their details; batteries and logs.
+    Overview,
+    GKeys,
+    Layout,
     Macros,
+    Headset,
 }
 
 impl Settings {
-    fn settings_tab(&mut self, ui: &mut egui::Ui, status: &Status) {
-        ui.heading("Devices");
-        ui.add_space(4.0);
-        egui::Grid::new("devices").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
-            for device in [Device::Keyboard, Device::Headset] {
-                ui.strong(device.label());
-                ui.label(device_line(device, status));
-                ui.end_row();
+    fn overview_tab(&mut self, ui: &mut egui::Ui, status: &Status) {
+        ui.columns(2, |c| {
+            for (col, device) in c.iter_mut().zip([Device::Keyboard, Device::Headset]) {
+                col.heading(device.label());
+                col.label(device_line(device, status));
+                col.add_space(6.0);
+                let d = &status.device(device).details;
+                if d.firmware.is_empty() && d.sidetone.is_none() {
+                    col.label(egui::RichText::new("Details once it connects.").weak());
+                } else {
+                    self.details(col, device, d);
+                }
             }
         });
         ui.add_space(12.0);
-        self.keyboard_gkeys(ui);
-        ui.add_space(12.0);
-        self.headset_buttons(ui);
-        ui.add_space(12.0);
-        self.headset_lighting(ui);
-        ui.add_space(12.0);
         self.general(ui);
-        ui.add_space(12.0);
-        self.save_row(ui);
     }
 }
 
@@ -634,6 +661,188 @@ impl Settings {
         ui.label(egui::RichText::new(hint).weak());
     }
 
+    /// What a device says about itself. Its serial number and wireless id
+    /// are masked until "Show" is clicked, so a screenshot can be shared.
+    fn details(&mut self, ui: &mut egui::Ui, device: Device, d: &super::details::Details) {
+        let masked = |v: &str| "\u{2022}".repeat(v.chars().count().max(8));
+        egui::Grid::new(("details-grid", device.name())).num_columns(2).spacing([16.0, 4.0]).show(
+            ui,
+            |ui| {
+                for (n, f) in d.firmware.iter().enumerate() {
+                    ui.label(if n == 0 { "Firmware" } else { "" });
+                    ui.label(f);
+                    ui.end_row();
+                }
+                if let Some(f) = &d.receiver_firmware {
+                    ui.label("Receiver firmware");
+                    ui.label(f);
+                    ui.end_row();
+                }
+                for (what, value) in [("Serial number", &d.serial), ("Wireless id", &d.wireless_id)]
+                {
+                    let Some(v) = value else { continue };
+                    ui.label(what);
+                    ui.horizontal(|ui| {
+                        ui.monospace(if self.show_ids { v.clone() } else { masked(v) });
+                        let text = if self.show_ids { "Hide" } else { "Show" };
+                        if ui
+                            .small_button(text)
+                            .on_hover_text("Shown only until the window closes.")
+                            .clicked()
+                        {
+                            self.show_ids = !self.show_ids;
+                        }
+                    });
+                    ui.end_row();
+                }
+                if let Some(ms) = d.report_ms {
+                    ui.label("Report interval");
+                    ui.label(format!("{ms} ms (as the receiver records it)"));
+                    ui.end_row();
+                }
+                if let Some((now, max)) = d.backlight {
+                    ui.label("Backlight");
+                    ui.label(format!("{now} of {max}"));
+                    ui.end_row();
+                }
+                if let Some(p) = &d.profile {
+                    ui.label("Bank");
+                    ui.label(p);
+                    ui.end_row();
+                }
+                if let Some(s) = d.sidetone {
+                    ui.label("Sidetone");
+                    ui.label(format!("{s} of 100"));
+                    ui.end_row();
+                }
+                if let Some(bands) = &d.eq {
+                    ui.label("Equaliser");
+                    ui.vertical(|ui| {
+                        for row in bands.chunks(5) {
+                            let text: Vec<String> = row
+                                .iter()
+                                .map(|(hz, db)| {
+                                    format!("{} {db:+.1} dB", super::details::band_name(*hz))
+                                })
+                                .collect();
+                            ui.label(text.join(",  "));
+                        }
+                    });
+                    ui.end_row();
+                }
+                if device == Device::Headset {
+                    ui.label("Microphone");
+                    ui.label(match (d.mic_handled, d.mic_muted) {
+                        (false, _) => "muted by the headset itself, which tells nobody",
+                        (true, Some(true)) => "muted (in Windows)",
+                        (true, Some(false)) => "on",
+                        (true, None) => "not known yet",
+                    });
+                    ui.end_row();
+                    ui.label("Boom");
+                    ui.label(match (d.mic_handled, d.boom_up) {
+                        (false, _) => "not reported while the headset has its buttons",
+                        (true, Some(true)) => "up",
+                        (true, Some(false)) => "down",
+                        (true, None) => "not moved since blu-ghub took the buttons",
+                    });
+                    ui.end_row();
+                }
+            },
+        );
+    }
+
+    fn headset_sound(&mut self, ui: &mut egui::Ui) {
+        ui.heading(format!("{} sound", Device::Headset.label()));
+        ui.add_space(4.0);
+        let h = &mut self.draft.headset;
+        ui.horizontal(|ui| {
+            let mut on = h.sidetone.is_some_and(|s| s.on);
+            if ui
+                .checkbox(&mut on, "Sidetone")
+                .on_hover_text(
+                    "How much of your own voice the headset plays back, set each time it \
+                     switches on. Unticked: off (0); the level is kept for when it is ticked \
+                     again.",
+                )
+                .changed()
+            {
+                match &mut h.sidetone {
+                    Some(s) => s.on = on,
+                    None => h.sidetone = Some(Sidetone { on, level: 0 }),
+                }
+            }
+            if let Some(s) = &mut h.sidetone {
+                ui.add_enabled(s.on, egui::Slider::new(&mut s.level, 0..=100));
+            }
+        });
+    }
+
+    /// The equaliser Windows plays the headset through (Logitech's audio
+    /// processing), as a curve. Unticked it is shown and left alone;
+    /// ticked, a dragged band is written when let go, and Save keeps it.
+    fn headset_eq(&mut self, ui: &mut egui::Ui, status: &Status) {
+        ui.heading(format!("{} equaliser", Device::Headset.label()));
+        ui.add_space(4.0);
+        let Some(bands) = status.headset.details.eq.as_ref() else {
+            ui.label(
+                egui::RichText::new(
+                    "No Logitech equaliser on the headset's sound in Windows (it comes with \
+                     Logitech's audio driver).",
+                )
+                .weak(),
+            );
+            return;
+        };
+        let freqs: Vec<f32> = bands.iter().map(|b| b.0).collect();
+        let found: Vec<f32> = bands.iter().map(|b| b.1).collect();
+        let h = &mut self.draft.headset;
+        ui.horizontal(|ui| {
+            let mut on = h.equaliser.is_some();
+            if ui
+                .checkbox(&mut on, "Set the equaliser")
+                .on_hover_text(
+                    "Drag a point up or down; it is written when let go. Double-click a point \
+                     for 0 dB. Save keeps it. Unticked, it is left as it is.",
+                )
+                .changed()
+            {
+                h.equaliser = on.then(|| found.clone());
+                if !on {
+                    super::devices::preview_eq(None);
+                }
+            }
+            if let Some(g) = &mut h.equaliser
+                && ui.button("Flat").clicked()
+            {
+                g.iter_mut().for_each(|x| *x = 0.0);
+                super::devices::preview_eq(Some(g.clone()));
+            }
+        });
+        let range = (-12.0, 12.0);
+        match &mut h.equaliser {
+            Some(g) => {
+                g.resize(freqs.len(), 0.0);
+                let r = super::eq_widget::show(ui, &freqs, g, range, 0.5, true, &mut self.eq_drag);
+                if r.settled {
+                    super::devices::preview_eq(Some(g.clone()));
+                }
+            }
+            None => {
+                let mut g = found;
+                super::eq_widget::show(ui, &freqs, &mut g, range, 0.5, false, &mut None);
+            }
+        }
+        ui.label(
+            egui::RichText::new(
+                "This is the equaliser in Logitech's audio processing in Windows, which the \
+                 headset's sound goes through. A change is heard from the next time playback \
+                 starts: stop and play (pausing is not enough).",
+            )
+            .weak(),
+        );
+    }
+
     fn headset_lighting(&mut self, ui: &mut egui::Ui) {
         ui.heading(format!("{} lighting", Device::Headset.label()));
         ui.add_space(4.0);
@@ -708,6 +917,7 @@ impl Settings {
             }
             if ui.add_enabled(changed, egui::Button::new("Undo changes")).clicked() {
                 self.draft = self.saved.clone();
+                super::devices::preview_eq(None);
                 self.note = None;
             }
             if ui

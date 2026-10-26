@@ -38,17 +38,43 @@ Open log folder
 Quit
 ```
 
-**Settings…** opens a window with each device's state, battery, voltage and
-the time of the reading, the G915 layout editor (below), and the settings
-below: the G915's G-keys, the G935's buttons and lighting, the low-battery
-warning, how often batteries are read, how long logs are kept, and Start
-with Windows. Save applies them at once. The keyboard's settings are applied
+**Settings…** opens a window in tabs: *Overview* (both devices side by
+side: state, battery, voltage, the time of the reading, and their details;
+the low-battery warning, how often batteries are read, how long logs are
+kept, Start with Windows), the G915's *G-keys* and *layout* (below),
+*Macros*, and the *G935* (buttons, sound, lighting). Save applies them at
+once. The keyboard's settings are applied
 in place, sending only what changed (new colours repaint those keys, new
 G-key actions send nothing); a changed headset button hands the headset's
 buttons back and takes them again. Saving rewrites the config file, so
 comments written in it by hand do not survive; the version replaced is kept
 as `BluGHub.toml.bak`. A file that could not be read when BluGHub started is
 never saved over.
+
+**Details** under each device: firmware (and the receiver's), serial number
+and wireless id (masked until *Show* is clicked, so a screenshot can be
+shared; never written to the log), the report interval the receiver
+records, the backlight level, the bank in use; for the headset its
+sidetone, the equaliser in Windows (below) and, while blu-ghub has its
+buttons, the microphone's mute and the boom. What cannot change is read
+once; the rest each time the device connects or switches on. The devices
+report no signal strength, radio channel or power draw.
+
+**Headset equaliser.** What you hear from the G935 goes through Logitech's
+audio processing in Windows ("Logitech HX2E Surround Sound Effect", which
+G HUB's audio driver attaches to the headset's playback endpoint), and its
+equaliser is the one that counts: the headset's own equaliser setting
+(HID++ 0x8310) is accepted and read back, but does not change the sound.
+The G935 tab shows Logitech's equaliser as a curve, a point per band (10
+bands, 40 Hz to 12.5 kHz, ±12 dB, half-dB steps). With *Set the equaliser*
+ticked, a point dragged up or down is written when let go, a double-click
+puts it back to 0 dB, and Save keeps it as `equaliser` under `[headset]`
+(one dB value a band); blu-ghub writes it at start-up when Windows has
+another, and never otherwise. Unticked, it is left alone. Closing the window
+without saving puts back what was there. A change is heard from the next
+time playback starts (stop and play; pausing is not enough). It is set the
+way Windows' Sound control panel sets effects, without administrator
+rights; `BluGHub-diag apo-eq` shows it, and can set and restore it.
 
 **Re-apply to the devices** (in the window and the tray menu) hands
 everything back to both devices and takes it again with the saved settings,
@@ -172,6 +198,10 @@ brightness = 60              # 1-100 (steady: the colour is dimmed)
 
 [headset.lighting.logo]
 effect = "off"
+
+[headset.sidetone]           # set at each power-on; left out: the headset's own
+on = true                    # false: off (0), the level kept
+level = 20                   # 0-100
 ```
 
 **Keyboard lighting.** The G915 plays a layout stored in itself.
@@ -237,8 +267,8 @@ headset buttons' actions), `{ macro = "name" }`. Macro steps:
 `{ delay = ms }`, with the key names above plus `f13`-`f24`. A macro runs
 `once` per press, over and over `while_held`, or as a `toggle` from one
 press to the next; one runs at a time, and any key it left down is released
-when it ends. The settings window picks the actions (Settings → G915
-G-keys) and makes the macros (the Macros tab: steps added, reordered and
+when it ends. The settings window picks the actions (the G-keys tab) and
+makes the macros (the Macros tab: steps added, reordered and
 removed; renaming a macro follows into the G-keys, and one in use cannot be
 deleted). Typing goes in as if from a keyboard, so it does not reach
 a window running as administrator. Windows 11's Notepad sometimes shows
@@ -293,6 +323,7 @@ and work with nothing installed. These commands change them:
 | `BluGHub-diag write-test 2` | Writes profile 2 back unchanged, to prove the write path. |
 | `BluGHub-diag restore-sector 2 FILE` | Puts a saved copy of a profile back. |
 | `BluGHub-diag host-test [--leave]` | Tries the keyboard's host mode (software drives it, as G HUB does with its on-board memory off): asks for the word HOST first, lights M1, paints Escape red in its memory, and switches back to on-board mode on Enter. `--leave` stays in host mode, to see whether a power cycle ends it. |
+| `BluGHub-diag apo-eq [set G1 .. G10 \| restore FILE]` | Shows the equaliser of Logitech's audio processing on the G935's playback endpoint (what Windows plays the headset through); `set` saves it to a file first and sets the 10 gains in dB, `restore` puts a saved one back. Nothing is sent to the headset. |
 | `BluGHub-diag host-test --divert` | The same, with the G-keys taken as the tray app takes them: asks for the M1 light, waits 90 s with the keyboard untouched, asks for the M3 light, then hands the G-keys back and switches to on-board mode. |
 | `BluGHub-diag host-test --restore` | Hands the G-keys back, says which mode the keyboard is in, and puts it back in on-board mode. |
 | `BluGHub-diag slots` | Reads what the keyboard's stored-lighting slots hold: whether each is in use, its length, and the id and name G HUB gave it. Read requests only. |

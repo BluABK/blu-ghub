@@ -71,6 +71,57 @@ impl KeyboardLighting {
 pub struct Headset {
     pub buttons: HeadsetButtons,
     pub lighting: crate::lighting::HeadsetLighting,
+    /// How much of the microphone the headset plays back, set each time it
+    /// switches on; unset (never configured) leaves the headset's own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sidetone: Option<Sidetone>,
+    /// The equaliser Windows plays the headset through (Logitech's audio
+    /// processing): a gain in dB for each of its 10 bands, 40 Hz up. Unset
+    /// leaves it as it is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub equaliser: Option<Vec<f32>>,
+}
+
+/// The headset's sidetone: on, `level` (0-100) is set at each power-on;
+/// off, 0 is, and `level` is kept for when it is on again. The file may
+/// also hold a plain number (`sidetone = 30`), which is on at that level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "SidetoneFile")]
+pub struct Sidetone {
+    pub on: bool,
+    pub level: u8,
+}
+
+impl Sidetone {
+    /// What the headset is to be set to.
+    pub fn applied(self) -> u8 {
+        if self.on { self.level.min(100) } else { 0 }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum SidetoneFile {
+    Level(u8),
+    Table {
+        #[serde(default = "yes")]
+        on: bool,
+        #[serde(default)]
+        level: u8,
+    },
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl From<SidetoneFile> for Sidetone {
+    fn from(f: SidetoneFile) -> Self {
+        match f {
+            SidetoneFile::Level(level) => Sidetone { on: true, level },
+            SidetoneFile::Table { on, level } => Sidetone { on, level },
+        }
+    }
 }
 
 /// What the G935's G1-G3 do while blu-ghub runs. By default nothing is
@@ -135,6 +186,15 @@ impl Config {
             }
             known
         });
+        if let Some(s) = &mut self.headset.sidetone {
+            s.level = s.level.min(100);
+        }
+        if let Some(eq) = &mut self.headset.equaliser {
+            eq.resize(10, 0.0);
+            for g in eq.iter_mut() {
+                *g = if g.is_finite() { g.clamp(-12.0, 12.0) } else { 0.0 };
+            }
+        }
         let l = &mut self.headset.lighting;
         l.sides = l.sides.map(|z| z.sanitized());
         l.logo = l.logo.map(|z| z.sanitized());
@@ -301,6 +361,18 @@ mod tests {
         assert!(c.keyboard.gkeys.wanted());
         assert!(c.macros.iter().all(|m| m.problems().is_empty()));
         assert_eq!(c.clone().sanitized(), c);
+    }
+
+    #[test]
+    fn sidetone_off_means_zero_and_a_plain_number_means_on() {
+        let c: Config = toml::from_str("[headset]\nsidetone = 30\n").unwrap();
+        assert_eq!(c.headset.sidetone, Some(Sidetone { on: true, level: 30 }));
+        let c: Config = toml::from_str("[headset.sidetone]\non = false\nlevel = 40\n").unwrap();
+        let s = c.headset.sidetone.unwrap();
+        assert_eq!((s.level, s.applied()), (40, 0));
+        assert_eq!(Config::default().headset.sidetone, None);
+        let again: Config = toml::from_str(&toml::to_string(&c).unwrap()).unwrap();
+        assert_eq!(again, c);
     }
 
     #[test]

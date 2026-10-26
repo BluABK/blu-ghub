@@ -119,8 +119,7 @@ impl MacroEditor {
         ui.label(
             egui::RichText::new(
                 // No arrow: the window's font has none.
-                "Macros for the G-keys to run (pick one for a key in the Settings tab, \
-                 under G915 G-keys).",
+                "Macros for the G-keys to run (pick one for a key in the G-keys tab).",
             )
             .weak(),
         );

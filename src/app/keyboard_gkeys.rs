@@ -162,6 +162,11 @@ impl Takeover {
         self.gkey
     }
 
+    /// blu-ghub's bank, while it has the keys (and with them the M keys).
+    pub fn bank_label(&self) -> Option<String> {
+        self.diverted.then(|| format!("M{} (blu-ghub's bank)", self.bank + 1))
+    }
+
     /// The feature index M-key events arrive on while the keys are taken.
     pub fn mkey_feature(&self) -> Option<u8> {
         self.mkeys

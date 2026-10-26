@@ -58,6 +58,9 @@ serde_json = "1.0"
 # it silently falls back to a no-access handle when a read/write open fails.
 # Both would hide exactly the mistakes this program must not make.
 [target.'cfg(windows)'.dependencies]
+# For the `interface` macro (the audio policy service's undocumented COM
+# interface, see src/audio_fx.rs); the same crate `windows` already uses.
+windows-core = "0.62"
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Devices_DeviceAndDriverInstallation",

@@ -13,7 +13,9 @@
 //! are made outside the borrow, and [`with_app`] declines a nested borrow
 //! rather than panicking.
 
+pub mod details;
 pub mod devices;
+mod eq_widget;
 mod keyboard_editor;
 pub mod keyboard_gkeys;
 mod macro_editor;

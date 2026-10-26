@@ -23,6 +23,7 @@ compile_error!("blu-ghub talks to the Windows HID stack and only builds on Windo
 pub mod app;
 pub mod app_paths;
 pub mod audio;
+pub mod audio_fx;
 pub mod battery;
 pub mod clipboard;
 pub mod config;

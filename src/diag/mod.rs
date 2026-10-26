@@ -3,6 +3,7 @@
 //! Each writes its findings both to the console and to a timestamped file
 //! under `%APPDATA%\BluGHub\diag\`, so a run can be left going and read later.
 
+pub mod apo;
 pub mod caps;
 pub mod host;
 pub mod keys;
