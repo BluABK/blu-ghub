@@ -163,6 +163,8 @@ light the M keys (M1, then M3 on request). The stored lighting still draws
 over a painted key after a while idle, in host mode as in on-board mode:
 the mode turns the profiles off, not the effect engine (see the claim
 above). Back in on-board mode the keyboard lights its own profile again.
+**A power cycle ends host mode** (`host-test --leave`, then off and on: the
+keyboard came back reading 1, on-board).
 
 A profile sector's G1-G5 bindings sit at offset 32 (below); blu-ghub reads
 all three profiles' bindings when it takes the keys, so a key it leaves to
