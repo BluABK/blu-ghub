@@ -986,9 +986,10 @@ fn gkey_editor(
     action: &mut GAction,
     macros: &[String],
 ) -> bool {
-    const KINDS: [&str; 7] = [
+    const KINDS: [&str; 8] = [
         "The keyboard's own",
         "Nothing",
+        "A key (held as long)",
         "Type text",
         "Paste text",
         "Paste a file or image",
@@ -998,11 +999,12 @@ fn gkey_editor(
     let kind = |a: &GAction| match a {
         GAction::Default => 0,
         GAction::Off => 1,
-        GAction::Text(_) => 2,
-        GAction::Paste(_) => 3,
-        GAction::PasteFile(_) => 4,
-        GAction::Media(_) => 5,
-        GAction::Macro(_) => 6,
+        GAction::Key(_) => 2,
+        GAction::Text(_) => 3,
+        GAction::Paste(_) => 4,
+        GAction::PasteFile(_) => 5,
+        GAction::Media(_) => 6,
+        GAction::Macro(_) => 7,
     };
     let mut browse = false;
     let mut k = kind(action);
@@ -1018,14 +1020,45 @@ fn gkey_editor(
         *action = match k {
             0 => GAction::Default,
             1 => GAction::Off,
-            2 => GAction::Text(String::new()),
-            3 => GAction::Paste(String::new()),
-            4 => GAction::PasteFile(Default::default()),
-            5 => GAction::Media(ButtonAction::PlayPause),
+            2 => GAction::Key("left_ctrl".into()),
+            3 => GAction::Text(String::new()),
+            4 => GAction::Paste(String::new()),
+            5 => GAction::PasteFile(Default::default()),
+            6 => GAction::Media(ButtonAction::PlayPause),
             _ => GAction::Macro(macros.first().cloned().unwrap_or_default()),
         };
     }
     match action {
+        GAction::Key(s) => {
+            let mut c = crate::gkeys::Combo::parse(s);
+            let before = c.clone();
+            for (on, name) in [
+                (&mut c.ctrl, "Ctrl"),
+                (&mut c.shift, "Shift"),
+                (&mut c.alt, "Alt"),
+                (&mut c.win, "Win"),
+            ] {
+                ui.checkbox(on, name);
+            }
+            egui::ComboBox::from_id_salt(("gkey-key", id))
+                .selected_text(if c.key.is_empty() { "(none)" } else { c.key.as_str() })
+                .width(130.0)
+                .height(300.0)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut c.key, String::new(), "(none)");
+                    for name in super::macro_editor::key_names() {
+                        ui.selectable_value(&mut c.key, name.to_owned(), name);
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "Held for as long as the G-key is. F13-F24 are not on the keyboard, so \
+                     programs can take them for hotkeys of their own.",
+                );
+            if c != before {
+                *s = c.text();
+            }
+        }
         GAction::Text(t) => {
             ui.add(egui::TextEdit::singleline(t).desired_width(200.0).hint_text("text to type"))
                 .on_hover_text("Typed as if from a keyboard, whatever its layout.");

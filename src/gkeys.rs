@@ -35,6 +35,9 @@ pub enum GAction {
     /// Nothing.
     #[serde(alias = "disabled", alias = "none")]
     Off,
+    /// A key, held for as long as the G-key is: "left_ctrl", "f13",
+    /// "ctrl+shift+f13" (see [`Combo`]).
+    Key(String),
     /// Type this text, whatever the keyboard layout.
     Text(String),
     /// Paste this text (through the clipboard, which is put back after).
@@ -45,6 +48,73 @@ pub enum GAction {
     Media(ButtonAction),
     /// Run the macro of this name.
     Macro(String),
+}
+
+/// A key with modifiers, written "ctrl+shift+f13": `ctrl`, `shift`, `alt`
+/// and `win` are the left ones, then a key name (the keyboard's keys, or
+/// `f13`-`f24`; a modifier's own name, `left_ctrl`, works alone).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Combo {
+    pub ctrl: bool,
+    pub shift: bool,
+    pub alt: bool,
+    pub win: bool,
+    pub key: String,
+}
+
+impl Combo {
+    pub fn parse(s: &str) -> Combo {
+        let mut c = Combo::default();
+        for part in s.split('+').map(|p| p.trim().to_ascii_lowercase()) {
+            match part.as_str() {
+                "ctrl" | "control" => c.ctrl = true,
+                "shift" => c.shift = true,
+                "alt" => c.alt = true,
+                "win" | "windows" => c.win = true,
+                "" => {}
+                _ => c.key = part,
+            }
+        }
+        c
+    }
+
+    pub fn text(&self) -> String {
+        let mut parts: Vec<&str> = Vec::new();
+        for (on, name) in
+            [(self.ctrl, "ctrl"), (self.shift, "shift"), (self.alt, "alt"), (self.win, "win")]
+        {
+            if on {
+                parts.push(name);
+            }
+        }
+        if !self.key.is_empty() {
+            parts.push(&self.key);
+        }
+        parts.join("+")
+    }
+
+    /// The keys to hold, modifiers first; `None` if a name is unknown or
+    /// there is nothing to press.
+    pub fn keys(&self) -> Option<Vec<crate::inject::Key>> {
+        let mut out = Vec::new();
+        for (on, name) in [
+            (self.ctrl, "left_ctrl"),
+            (self.shift, "left_shift"),
+            (self.alt, "left_alt"),
+            (self.win, "left_win"),
+        ] {
+            if on {
+                out.push(crate::inject::key_named(name)?);
+            }
+        }
+        if !self.key.is_empty() {
+            let k = crate::inject::key_named(&self.key)?;
+            if !out.contains(&k) {
+                out.push(k);
+            }
+        }
+        (!out.is_empty()).then_some(out)
+    }
 }
 
 impl GAction {
@@ -122,6 +192,21 @@ impl GKeys {
 
     pub fn banks_mut(&mut self) -> [&mut Bank; 3] {
         [&mut self.m1, &mut self.m2, &mut self.m3]
+    }
+
+    /// Keys that name no key, for the log.
+    pub fn problems(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for (b, bank) in self.banks().iter().enumerate() {
+            for (k, a) in bank.keys().iter().enumerate() {
+                if let GAction::Key(s) = a
+                    && Combo::parse(s).keys().is_none()
+                {
+                    out.push(format!("M{} G{}: no key {s:?}", b + 1, k + 1));
+                }
+            }
+        }
+        out
     }
 
     /// Does any key have an action of blu-ghub's? Only then are the
@@ -281,6 +366,22 @@ mod tests {
         .unwrap();
         assert_eq!(d.gkeys.m1.g1, GAction::Paste("hi".into()));
         assert_eq!(d.gkeys.m1.g2, GAction::PasteFile(r"C:\pics\a.png".into()));
+    }
+
+    #[test]
+    fn key_combos_read_and_write() {
+        let c = Combo::parse("Ctrl+Shift+F13");
+        assert!(c.ctrl && c.shift && !c.alt && c.key == "f13");
+        assert_eq!(c.text(), "ctrl+shift+f13");
+        assert_eq!(c.keys().unwrap().len(), 3);
+        // A modifier on its own, and ctrl with it named twice.
+        assert_eq!(Combo::parse("left_ctrl").keys().unwrap().len(), 1);
+        assert_eq!(Combo::parse("ctrl+left_ctrl").keys().unwrap().len(), 1);
+        assert_eq!(Combo::parse("ctrl+nope").keys(), None);
+        assert_eq!(Combo::parse("").keys(), None);
+        let d: Doc = toml::from_str("[gkeys.m1]\ng5 = { key = \"left_ctrl\" }\n").unwrap();
+        assert_eq!(d.gkeys.m1.g5, GAction::Key("left_ctrl".into()));
+        assert!(d.gkeys.problems().is_empty());
     }
 
     #[test]

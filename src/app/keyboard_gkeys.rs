@@ -136,6 +136,9 @@ impl Takeover {
                 warn!("G915: {p}");
             }
         }
+        for p in setup.gkeys.problems() {
+            warn!("G915: {p}");
+        }
         Takeover {
             setup,
             gkey: None,
@@ -452,6 +455,13 @@ impl Takeover {
                 action
             }
             GAction::Off => None,
+            GAction::Key(s) => {
+                let keys = crate::gkeys::Combo::parse(s).keys();
+                if keys.is_none() {
+                    warn!("G915: G{} in M{}: no key {s:?}", key + 1, self.bank + 1);
+                }
+                keys.map(Action::Keys)
+            }
             GAction::Text(t) => Some(Action::Text(t.clone())),
             GAction::Paste(t) => Some(Action::Paste(t.clone())),
             GAction::PasteFile(p) => Some(Action::PasteFile(p.clone())),

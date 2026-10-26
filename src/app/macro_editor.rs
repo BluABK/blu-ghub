@@ -70,7 +70,7 @@ fn step_of_kind(k: usize, old: &Step) -> Step {
 }
 
 /// Every key a step can press: the keyboard's keys and F13-F24.
-fn key_names() -> Vec<&'static str> {
+pub(super) fn key_names() -> Vec<&'static str> {
     const EXTRA: [&str; 12] =
         ["f13", "f14", "f15", "f16", "f17", "f18", "f19", "f20", "f21", "f22", "f23", "f24"];
     crate::keymap::KEYS

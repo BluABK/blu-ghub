@@ -172,7 +172,7 @@ light_m_keys = false          # light the M keys themselves (host mode, see belo
 g1 = { text = "On my way!" }
 g2 = { media = "play_pause" }
 g3 = { macro = "copy-paste" }
-g4 = "off"
+g4 = { key = "left_ctrl" }    # held as long as G4 is
 # g5 left out: what the keyboard's own profile says
 
 [[macros]]
@@ -258,7 +258,9 @@ keyboard is switched off and on; typing and the lighting are not affected.
 At its first contact blu-ghub puts a keyboard it finds in host mode back
 into on-board mode, unless it is about to use it.
 
-Actions: `default`, `off`, `{ text = "..." }` (typed as Unicode, whatever
+Actions: `default`, `off`, `{ key = "ctrl+shift+f13" }` (a key held for as
+long as the G-key is; `ctrl`, `shift`, `alt`, `win` and a key name, or a
+key name alone such as `left_ctrl`, `f13`-`f24` included), `{ text = "..." }` (typed as Unicode, whatever
 the layout; a line break presses Enter), `{ paste = "..." }`,
 `{ paste_file = "C:\\path\\picture.png" }`, `{ media = "..." }` (the
 headset buttons' actions), `{ macro = "name" }`. Macro steps:
