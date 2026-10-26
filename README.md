@@ -65,11 +65,11 @@ Both devices also report battery changes on their own, so the fallback rarely
 matters. Nothing is sent to a sleeping keyboard or a switched-off headset; the
 app waits for them to announce themselves. The writes: turning on the
 receiver's connection notifications if a replug has turned them off (G HUB
-used to do this), taking the headset's buttons over and back and setting its
-lighting (below), and, only while the layout editor is open, painting the
-keyboard's keys in its memory.
-Even with no buttons configured, the headset gets one hand-back the first
-time it is on, which undoes a takeover left behind by a killed run.
+used to do this), taking the headset's buttons and the keyboard's G-keys
+over and back, setting the headset's lighting (below), and, only while the
+layout editor is open, painting the keyboard's keys in its memory. Even
+with no buttons or G-keys configured, each device gets one hand-back the
+first time it is on, which undoes a takeover left behind by a killed run.
 
 Between those moments the app is idle: its main thread waits for Windows
 messages and each device's worker waits for that device, with no timers.
@@ -123,6 +123,23 @@ esc = "#2a6fd4"
 f1 = "#d42a8c"
 logo = "#2a6fd4"
 
+[keyboard.gkeys.m1]           # G1-G5 while M1 is lit; m2, m3 likewise
+g1 = { text = "On my way!" }
+g2 = { media = "play_pause" }
+g3 = { macro = "copy-paste" }
+g4 = "off"
+# g5 left out: what the keyboard's own profile says
+
+[[macros]]
+name = "copy-paste"
+mode = "once"                 # once, while_held, toggle
+delay_ms = 30                 # after each step
+steps = [
+  { down = "left_ctrl" }, { tap = "c" }, { up = "left_ctrl" },
+  { delay = 200 },
+  { down = "left_ctrl" }, { tap = "v" }, { up = "left_ctrl" },
+]
+
 [headset.buttons]
 g1 = "previous_track"
 g2 = "next_track"
@@ -156,6 +173,32 @@ a layout in the keyboard is not done yet.
 
 Key names follow the key's position on a US layout (`semicolon` is Ø on a
 Nordic board); the full list is in `src/keymap.rs`.
+
+**Keyboard G-keys.** Out of the box the G915 keeps its G-keys and does what
+its own profile says (`BluGHub-diag set-gkeys` changes that). Give any key
+in any bank an action and blu-ghub takes all five over (the keyboard hands
+over all or none) each time the keyboard wakes, and hands them back when it
+quits or crashes. A key left at `default` then keeps that bank's profile key
+(read from the keyboard when the keys are taken), typed by blu-ghub.
+On-board macros and profile switches on a G-key cannot be done that way,
+and the log says so.
+
+The M keys come with the G-keys: while blu-ghub has them, M1-M3 switch
+blu-ghub's bank instead of the keyboard's profile, starting from the profile
+the keyboard was on, and their lights stay dark (the keyboard does not show
+them for the host in on-board mode). The keyboard stays on its profile, and
+is back on it, lit, when blu-ghub hands the keys back.
+
+Actions: `default`, `off`, `{ text = "..." }` (typed as Unicode, whatever
+the layout; a line break presses Enter), `{ media = "..." }` (the headset
+buttons' actions), `{ macro = "name" }`. Macro steps: `{ tap = "key" }`,
+`{ down = "key" }`, `{ up = "key" }`, `{ text = "..." }`,
+`{ media = "..." }`, `{ delay = ms }`, with the key names above plus
+`f13`-`f24`. A macro runs `once` per press, over and over `while_held`, or
+as a `toggle` from one press to the next; one runs at a time, and any key
+it left down is released when it ends. The settings window picks the
+actions; macros are written in the file for now. Typing goes in as if from
+a keyboard, so it does not reach a window running as administrator.
 
 **Headset lighting.** A zone with no `[headset.lighting.*]` section is never
 written and shows whatever the headset does by itself. A configured one is

@@ -128,6 +128,26 @@ two). Its profile card says `"slot": 1` where the profile entry has slot 0,
 so G HUB presumably counts from 1. The colours themselves
 cannot be read back: 0x8081 has no get function (`BluGHub-diag slots`).
 
+## G-keys and M-keys: 0x8010, 0x8020
+
+**Verified on this unit**, on the cable and in on-board mode:
+
+- **Taking the G-keys:** 0x8010 fn2 `[01]` takes all five G-keys (`[00]` hands
+  them back). Each press and release is an event on the GKEY index: byte 0 is
+  a bitmask of the keys down (bit 0 = G1).
+- **The M keys come with them.** M1-M3 stop switching the on-board profile
+  and send events on the MKEYS index instead: `[mask]` on press (bit 0 = M1),
+  `[00]` on release. 0x8100 fn4 keeps answering the profile the keyboard was
+  on.
+- **The M lights go out.** 0x8020 fn1 `[mask]` (Solaar's "M-Key LEDs") is
+  accepted but shows nothing in on-board mode.
+- **On hand-back**, the keyboard lights its own profile's M key again, and
+  the M keys switch profiles as before.
+
+A profile sector's G1-G5 bindings sit at offset 32 (below); blu-ghub reads
+all three profiles' bindings when it takes the keys, so a key it leaves to
+the keyboard types what the bank's profile has.
+
 ## On-board profiles: 0x8100
 
 Description (probe): memory model 01, profile format 04, macro format 01,

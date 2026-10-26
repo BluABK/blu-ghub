@@ -15,6 +15,7 @@
 
 pub mod devices;
 mod keyboard_editor;
+pub mod keyboard_gkeys;
 mod settings;
 
 use std::cell::{Cell, RefCell};
@@ -814,7 +815,11 @@ impl App {
             }
             let rep = Reporter { shared: self.shared.clone(), hwnd: self.hwnd.0 as isize };
             let headset = self.config.headset.clone();
-            if let Some(w) = devices::start(link, &all, rep, poll, headset) {
+            let keyboard = keyboard_gkeys::Setup {
+                gkeys: self.config.keyboard.gkeys.clone(),
+                macros: self.config.macros.clone(),
+            };
+            if let Some(w) = devices::start(link, &all, rep, poll, headset, keyboard) {
                 self.workers.push(w);
             }
         }
@@ -867,10 +872,16 @@ impl App {
         let old = std::mem::replace(&mut self.config, new);
         let poll = old.settings.battery_check_minutes != self.config.settings.battery_check_minutes;
         let buttons = old.headset != self.config.headset;
-        info!("settings saved{}", if poll || buttons { "; restarting workers" } else { "" });
-        let (stop, keep): (Vec<Worker>, Vec<Worker>) = std::mem::take(&mut self.workers)
-            .into_iter()
-            .partition(|w| poll || (buttons && w.link == Link::Headset));
+        let gkeys =
+            old.keyboard.gkeys != self.config.keyboard.gkeys || old.macros != self.config.macros;
+        info!(
+            "settings saved{}",
+            if poll || buttons || gkeys { "; restarting workers" } else { "" }
+        );
+        let (stop, keep): (Vec<Worker>, Vec<Worker>) =
+            std::mem::take(&mut self.workers).into_iter().partition(|w| {
+                poll || (buttons && w.link == Link::Headset) || (gkeys && w.link != Link::Headset)
+            });
         self.workers = keep;
         for w in stop {
             w.stop();

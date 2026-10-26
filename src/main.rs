@@ -38,6 +38,7 @@ fn install_panic_hook() {
             let _ = f.write_all(line.as_bytes());
         }
         blu_ghub::app::devices::emergency_hand_back();
+        blu_ghub::app::keyboard_gkeys::emergency_hand_back();
         default(info);
     }));
 }

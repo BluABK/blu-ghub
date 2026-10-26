@@ -30,6 +30,7 @@ use super::devices::{Device, Shared, State, Status};
 use super::keyboard_editor;
 use crate::config::Config;
 use crate::ghub_import;
+use crate::gkeys::GAction;
 use crate::input::ButtonAction;
 use crate::lighting::{Effect, Rgb, ZoneLight};
 use crate::platform;
@@ -232,6 +233,8 @@ struct Settings {
     ghub_pick: usize,
     tab: Tab,
     editor: keyboard_editor::Editor,
+    /// The M bank shown in the G-key section.
+    gkey_bank: usize,
     opened: Instant,
     auto_close: Option<Duration>,
     /// Passes of `logic` and painted frames, logged on close: an idle window
@@ -258,6 +261,7 @@ impl Settings {
             ghub_pick: 0,
             tab: Tab::Settings,
             editor: Default::default(),
+            gkey_bank: 0,
             opened: Instant::now(),
             auto_close,
             passes: 0,
@@ -372,6 +376,8 @@ impl Settings {
             }
         });
         ui.add_space(12.0);
+        self.keyboard_gkeys(ui);
+        ui.add_space(12.0);
         self.headset_buttons(ui);
         ui.add_space(12.0);
         self.headset_lighting(ui);
@@ -458,6 +464,54 @@ impl Settings {
                         }
                         Err(e) => (format!("Import: {e:#}"), true),
                     });
+                }
+            }
+        }
+    }
+
+    fn keyboard_gkeys(&mut self, ui: &mut egui::Ui) {
+        ui.heading("G915 G-keys");
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            for (i, name) in ["M1", "M2", "M3"].into_iter().enumerate() {
+                ui.selectable_value(&mut self.gkey_bank, i, name);
+            }
+        });
+        let macros: Vec<String> = self.draft.macros.iter().map(|m| m.name.clone()).collect();
+        let b = self.gkey_bank;
+        let bank = self.draft.keyboard.gkeys.banks_mut().into_iter().nth(b);
+        if let Some(bank) = bank {
+            egui::Grid::new(("gkeys", b)).num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
+                for (i, action) in bank.keys_mut().into_iter().enumerate() {
+                    ui.strong(format!("G{}", i + 1));
+                    ui.horizontal(|ui| gkey_editor(ui, (b, i), action, &macros));
+                    ui.end_row();
+                }
+            });
+        }
+        ui.add_space(2.0);
+        let hint = if self.draft.keyboard.gkeys.wanted() {
+            "blu-ghub takes all five G-keys over (the keyboard hands over all or none); \
+             those left to the keyboard still do what its own profile says."
+        } else {
+            "The keyboard keeps its G-keys and does what its own profile says."
+        };
+        ui.label(egui::RichText::new(hint).weak());
+        if !self.draft.macros.is_empty() {
+            ui.add_space(4.0);
+            ui.label("Macros (written in BluGHub.toml for now):");
+            for m in &self.draft.macros {
+                let steps = m.steps.len();
+                ui.label(format!(
+                    "  {}: {}, {steps} step{}",
+                    m.name,
+                    m.mode.label(),
+                    if steps == 1 { "" } else { "s" }
+                ));
+                for p in m.problems() {
+                    ui.label(
+                        egui::RichText::new(format!("    {p}")).color(ui.visuals().error_fg_color),
+                    );
                 }
             }
         }
@@ -611,6 +665,68 @@ fn read_ghub() -> Result<GHub, String> {
     let doc = ghub_import::read(&path).map_err(|e| format!("{e:#}"))?;
     let presets = ghub_import::presets(&doc);
     Ok(GHub { doc, presets })
+}
+
+/// One G-key: left to the keyboard, nothing, text, a media key or a macro.
+fn gkey_editor(ui: &mut egui::Ui, id: (usize, usize), action: &mut GAction, macros: &[String]) {
+    const KINDS: [&str; 5] =
+        ["The keyboard's own", "Nothing", "Type text", "Media or volume key", "Macro"];
+    let kind = |a: &GAction| match a {
+        GAction::Default => 0,
+        GAction::Off => 1,
+        GAction::Text(_) => 2,
+        GAction::Media(_) => 3,
+        GAction::Macro(_) => 4,
+    };
+    let mut k = kind(action);
+    egui::ComboBox::from_id_salt(("gkind", id)).selected_text(KINDS[k]).width(160.0).show_ui(
+        ui,
+        |ui| {
+            for (i, label) in KINDS.iter().enumerate() {
+                ui.selectable_value(&mut k, i, *label);
+            }
+        },
+    );
+    if k != kind(action) {
+        *action = match k {
+            0 => GAction::Default,
+            1 => GAction::Off,
+            2 => GAction::Text(String::new()),
+            3 => GAction::Media(ButtonAction::PlayPause),
+            _ => GAction::Macro(macros.first().cloned().unwrap_or_default()),
+        };
+    }
+    match action {
+        GAction::Text(t) => {
+            ui.add(egui::TextEdit::singleline(t).desired_width(200.0).hint_text("text to type"));
+        }
+        GAction::Media(m) => {
+            egui::ComboBox::from_id_salt(("gmedia", id))
+                .selected_text(m.label())
+                .width(170.0)
+                .show_ui(ui, |ui| {
+                    for a in ButtonAction::ALL {
+                        if !matches!(a, ButtonAction::Default | ButtonAction::Off) {
+                            ui.selectable_value(m, a, a.label());
+                        }
+                    }
+                });
+        }
+        GAction::Macro(_) if macros.is_empty() => {
+            ui.label(egui::RichText::new("no macros in BluGHub.toml yet").weak());
+        }
+        GAction::Macro(name) => {
+            egui::ComboBox::from_id_salt(("gmacro", id))
+                .selected_text(name.as_str())
+                .width(170.0)
+                .show_ui(ui, |ui| {
+                    for m in macros {
+                        ui.selectable_value(name, m.clone(), m);
+                    }
+                });
+        }
+        GAction::Default | GAction::Off => {}
+    }
 }
 
 /// One zone: left to the headset, or an effect with its colour, speed

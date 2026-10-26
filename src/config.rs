@@ -19,12 +19,15 @@ pub struct Config {
     pub settings: Settings,
     pub keyboard: Keyboard,
     pub headset: Headset,
+    /// For the G-keys, by name.
+    pub macros: Vec<crate::gkeys::Macro>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Keyboard {
     pub lighting: KeyboardLighting,
+    pub gkeys: crate::gkeys::GKeys,
 }
 
 /// A per-key layout for the G915, by key name ([`crate::keymap`]). Kept for
@@ -244,6 +247,19 @@ mod tests {
     #[test]
     fn action_names_are_lower_case_only() {
         assert!(toml::from_str::<Config>("[headset.buttons]\ng2 = \"PlayPause\"\n").is_err());
+    }
+
+    #[test]
+    fn the_readme_example_reads() {
+        let readme = include_str!("../README.md");
+        let start = readme.find("```toml").unwrap();
+        let body = &readme[start..];
+        let body = &body[body.find('\n').unwrap() + 1..];
+        let text = &body[..body.find("```").unwrap()];
+        let c: Config = toml::from_str(text).unwrap();
+        assert!(c.keyboard.gkeys.wanted());
+        assert!(c.macros.iter().all(|m| m.problems().is_empty()));
+        assert_eq!(c.clone().sanitized(), c);
     }
 
     #[test]

@@ -382,6 +382,7 @@ pub fn start(
     rep: Reporter,
     poll: Duration,
     headset_config: crate::config::Headset,
+    keyboard_setup: super::keyboard_gkeys::Setup,
 ) -> Option<Worker> {
     let (pid, label) = match link {
         Link::KeyboardReceiver => (0xC547, "G915 receiver"),
@@ -427,7 +428,9 @@ pub fn start(
         .spawn(move || {
             info!("{}: worker started (device index {dev:#04x})", link.label());
             match link {
-                Link::KeyboardReceiver | Link::KeyboardCable => keyboard(ch, link, dev, &rep, poll),
+                Link::KeyboardReceiver | Link::KeyboardCable => {
+                    keyboard(ch, link, dev, &rep, poll, keyboard_setup)
+                }
                 Link::Headset => headset(
                     ch,
                     &rep,
@@ -472,11 +475,32 @@ fn wait_for(awake: bool, due: Option<Instant>, poll: Duration) -> Option<Duratio
     awake.then(|| due.map(|d| d.saturating_duration_since(Instant::now())).unwrap_or(poll))
 }
 
-fn keyboard(mut ch: Channel, link: Link, dev: u8, rep: &Reporter, poll: Duration) {
+fn keyboard(
+    mut ch: Channel,
+    link: Link,
+    dev: u8,
+    rep: &Reporter,
+    poll: Duration,
+    setup: super::keyboard_gkeys::Setup,
+) {
+    let mut gkeys = super::keyboard_gkeys::Takeover::new(setup);
+    keyboard_loop(&mut ch, link, dev, rep, poll, &mut gkeys);
+    // However the loop ended: hand the G-keys back.
+    gkeys.release(&mut ch, dev);
+}
+
+fn keyboard_loop(
+    ch: &mut Channel,
+    link: Link,
+    dev: u8,
+    rep: &Reporter,
+    poll: Duration,
+    gkeys: &mut super::keyboard_gkeys::Takeover,
+) {
     let name = link.label();
     let wireless = link == Link::KeyboardReceiver;
     if wireless {
-        enable_link_notifications(&mut ch);
+        enable_link_notifications(ch);
     }
     rep.update(link, |s| s.state = State::Sleeping);
     preview_slot().waker = Some(ch.waker());
@@ -520,6 +544,7 @@ fn keyboard(mut ch: Channel, link: Link, dev: u8, rep: &Reporter, poll: Duration
                         s.state = State::Connected;
                         s.battery = Some(b);
                     });
+                    gkeys.settle(ch, dev);
                 }
                 // A sleeping keyboard is answered by the receiver: 0x09
                 // "resource error", or 0x08 "unknown device" once the link is
@@ -557,20 +582,31 @@ fn keyboard(mut ch: Channel, link: Link, dev: u8, rep: &Reporter, poll: Duration
                 let now = Instant::now() + Duration::from_millis(50);
                 need_read = connected && due.is_none_or(|d| d <= now);
                 if connected && painter.due().is_some_and(|d| d <= now) {
-                    painter.paint(&mut ch, dev, name);
+                    painter.paint(ch, dev, name);
                 }
             }
             Ok(Some(Event::Control(QUIT))) => return,
             Ok(Some(Event::Control(PREVIEW))) => {
                 if connected {
-                    painter.paint(&mut ch, dev, name);
+                    painter.paint(ch, dev, name);
                 } else {
                     painter.forget();
                 }
             }
-            Ok(Some(Event::Control(_))) => need_read = true,
+            Ok(Some(Event::Control(_))) => {
+                gkeys.invalidate();
+                need_read = true;
+            }
             Ok(Some(Event::Report(r))) => {
                 let d = &r.data;
+                if let Some(p) = gkeys.event_feature().and_then(|g| event_payload(d, dev, g)) {
+                    gkeys.on_keys(ch, dev, p[0]);
+                    continue;
+                }
+                if let Some(p) = gkeys.mkey_feature().and_then(|m| event_payload(d, dev, m)) {
+                    gkeys.on_mkeys(ch, dev, p[0]);
+                    continue;
+                }
                 let just_read =
                     connected && last_ok.is_some_and(|t| t.elapsed() < Duration::from_secs(2));
                 // HID++ 1.0 "device connection" from the receiver: flag bit 6
@@ -584,6 +620,7 @@ fn keyboard(mut ch: Channel, link: Link, dev: u8, rep: &Reporter, poll: Duration
                         connected = false;
                         due = None;
                         painter.forget();
+                        gkeys.forget();
                         rep.update(link, |s| s.state = State::Sleeping);
                     }
                 } else if let Some(p) = battery_idx.and_then(|i| event_payload(d, dev, i)) {
@@ -606,6 +643,8 @@ fn keyboard(mut ch: Channel, link: Link, dev: u8, rep: &Reporter, poll: Duration
                     // Any event at all from a keyboard we think is asleep
                     // means it is not.
                     need_read = true;
+                } else if is_event_from(d, dev) {
+                    debug!("{name}: event {}", crate::diag::hex(&d[..d.len().min(8)]));
                 }
             }
         }
@@ -1032,9 +1071,13 @@ impl Buttons {
 struct Lights {
     config: HeadsetLighting,
     feat: Option<u8>,
-    /// Written since the headset last switched on (or one failed): not
-    /// retried until the next power-on, refresh or resume.
+    /// Written since the headset last switched on, or being retried.
     applied: bool,
+    /// A write failed (the headset busy, say, as charging starts): tried
+    /// again at `retry`, a few times, then not until the next power-on,
+    /// refresh or resume.
+    retry: Option<Instant>,
+    retries: u8,
 }
 
 impl Lights {
@@ -1044,9 +1087,24 @@ impl Lights {
         }
         self.applied = true;
         match crate::lighting::apply(ch, dev, &self.config, &mut self.feat) {
-            Ok(()) => debug!("G935: lighting set"),
+            Ok(()) => {
+                debug!("G935: lighting set");
+                self.retries = 0;
+            }
+            Err(e) if self.retries < RETRIES => {
+                self.retries += 1;
+                self.retry = Some(Instant::now() + RETRY_AFTER);
+                warn!("G935: could not set the lighting: {e:#}; trying again shortly");
+            }
             Err(e) => warn!("G935: could not set the lighting: {e:#}"),
         }
+    }
+
+    /// Write it again at the next chance (power-on, refresh, resume).
+    fn reset(&mut self) {
+        self.applied = false;
+        self.retry = None;
+        self.retries = 0;
     }
 }
 
@@ -1070,7 +1128,8 @@ fn headset(
         None => false,
     };
     let mut buttons = Buttons::new(actions, listening, setup.container);
-    let mut lights = Lights { config: lighting, feat: None, applied: false };
+    let mut lights =
+        Lights { config: lighting, feat: None, applied: false, retry: None, retries: 0 };
     if buttons.wanted() {
         for (n, a) in actions.iter().enumerate() {
             if *a == ButtonAction::Default {
@@ -1147,11 +1206,11 @@ fn headset(
             buttons.settle(&mut ch, dev);
         } else {
             buttons.forget();
-            lights.applied = false;
+            lights.reset();
         }
 
         let mut timeout = wait_for(on, due, poll);
-        if let Some(r) = buttons.retry {
+        for r in [buttons.retry, lights.retry].into_iter().flatten() {
             let left = r.saturating_duration_since(Instant::now());
             timeout = Some(timeout.map_or(left, |t| t.min(left)));
         }
@@ -1166,6 +1225,10 @@ fn headset(
                     buttons.retry = None;
                     buttons.failed = false;
                 }
+                if lights.retry.is_some_and(|r| r <= now) {
+                    lights.retry = None;
+                    lights.applied = false;
+                }
                 need_read = on && due.is_none_or(|d| d <= now);
             }
             Ok(Some(Event::Control(QUIT))) => {
@@ -1174,7 +1237,7 @@ fn headset(
             }
             Ok(Some(Event::Control(_))) => {
                 buttons.invalidate();
-                lights.applied = false;
+                lights.reset();
                 need_read = true;
             }
             Ok(Some(Event::Report(r))) => match route(&r.data, dev, buttons.feat, adc_idx) {
@@ -1226,7 +1289,7 @@ fn headset(
                     // On while on: a power-on that never showed as off.
                     if on && matches!(power, HeadsetPower::On(_)) {
                         buttons.invalidate();
-                        lights.applied = false;
+                        lights.reset();
                     }
                     apply(power, &mut on, &mut due);
                 }
