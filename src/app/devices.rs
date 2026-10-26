@@ -37,6 +37,11 @@ pub const REFRESH: u8 = 1;
 pub const QUIT: u8 = 2;
 /// The keyboard's worker: the wanted preview changed.
 const PREVIEW: u8 = 3;
+/// The keyboard's worker: new settings wait in its update slot.
+const UPDATE: u8 = 4;
+
+/// New settings for a running keyboard worker.
+type UpdateSlot = Arc<Mutex<Option<KeyboardSetup>>>;
 
 /// A layout the settings window wants shown on the keyboard while it is
 /// being edited, as (zone, colour), and the keyboard workers to tell (one
@@ -173,6 +178,15 @@ impl Painter {
             return;
         };
         let Some((feat, fx)) = self.features(ch, dev, name) else { return };
+        // Keys painted before but not wanted now (a smaller layout, the bank
+        // indicator alone) go back to the keyboard's own colours: hand the
+        // lighting back so it draws its layout again, and claim afresh.
+        if self.claimed && self.shown.keys().any(|z| !wanted.iter().any(|(w, _)| w == z)) {
+            if let Err(e) = ch.request(dev, fx, 5, &RELEASE) {
+                debug!("{name}: handing the lighting back: {e}");
+            }
+            self.forget();
+        }
         // The keyboard drops the first frame after a claim (seen in E7 and
         // again here): a fresh claim gets the whole frame twice.
         let fresh = !self.claimed;
@@ -353,6 +367,8 @@ pub struct Worker {
     waker: Waker,
     finished: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
+    /// A keyboard worker's: settings applied while it runs.
+    updates: Option<UpdateSlot>,
 }
 
 impl Worker {
@@ -361,6 +377,15 @@ impl Worker {
     }
     pub fn refresh(&self) {
         self.waker.wake(REFRESH);
+    }
+
+    /// Hand a keyboard worker new settings, applied in place: it sends the
+    /// keyboard only what they change. `false` for a headset worker.
+    pub fn update_keyboard(&self, setup: KeyboardSetup) -> bool {
+        let Some(slot) = &self.updates else { return false };
+        *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(setup);
+        self.waker.wake(UPDATE);
+        true
     }
     /// Ask the worker to stop and wait for it (it closes its channel). At
     /// most a few seconds: a request in flight finishes or times out first.
@@ -514,13 +539,15 @@ pub fn start(
     let waker = ch.waker();
     let finished = Arc::new(AtomicBool::new(false));
     let done = finished.clone();
+    let updates: Option<UpdateSlot> = (link != Link::Headset).then(|| Arc::new(Mutex::new(None)));
+    let worker_updates = updates.clone().unwrap_or_default();
     let thread = std::thread::Builder::new()
         .name(format!("worker-{}", link.label()))
         .spawn(move || {
             info!("{}: worker started (device index {dev:#04x})", link.label());
             match link {
                 Link::KeyboardReceiver | Link::KeyboardCable => {
-                    keyboard(ch, link, dev, &rep, poll, keyboard_setup)
+                    keyboard(ch, link, dev, &rep, poll, keyboard_setup, worker_updates)
                 }
                 Link::Headset => headset(
                     ch,
@@ -536,7 +563,7 @@ pub fn start(
             done.store(true, Ordering::SeqCst);
         })
         .ok()?;
-    Some(Worker { link, waker, finished, thread: Some(thread) })
+    Some(Worker { link, waker, finished, thread: Some(thread), updates })
 }
 
 /// A HID++ 2.0 event (software id 0) from `dev` on feature index `feat`.
@@ -566,6 +593,13 @@ fn wait_for(awake: bool, due: Option<Instant>, poll: Duration) -> Option<Duratio
     awake.then(|| due.map(|d| d.saturating_duration_since(Instant::now())).unwrap_or(poll))
 }
 
+/// What the keyboard worker keeps besides its channel.
+struct KeyboardParts {
+    gkeys: super::keyboard_gkeys::Takeover,
+    painter: Painter,
+    updates: UpdateSlot,
+}
+
 fn keyboard(
     mut ch: Channel,
     link: Link,
@@ -573,13 +607,17 @@ fn keyboard(
     rep: &Reporter,
     poll: Duration,
     setup: KeyboardSetup,
+    updates: UpdateSlot,
 ) {
-    let mut gkeys = super::keyboard_gkeys::Takeover::new(setup.gkeys);
-    let mut painter = Painter::new(setup.layout);
-    keyboard_loop(&mut ch, link, dev, rep, poll, &mut gkeys, &mut painter);
+    let mut parts = KeyboardParts {
+        gkeys: super::keyboard_gkeys::Takeover::new(setup.gkeys),
+        painter: Painter::new(setup.layout),
+        updates,
+    };
+    keyboard_loop(&mut ch, link, dev, rep, poll, &mut parts);
     // However the loop ended: hand the G-keys and the lighting back.
-    gkeys.release(&mut ch, dev);
-    painter.release(&mut ch, dev, link.label());
+    parts.gkeys.release(&mut ch, dev);
+    parts.painter.release(&mut ch, dev, link.label());
 }
 
 fn keyboard_loop(
@@ -588,9 +626,9 @@ fn keyboard_loop(
     dev: u8,
     rep: &Reporter,
     poll: Duration,
-    gkeys: &mut super::keyboard_gkeys::Takeover,
-    painter: &mut Painter,
+    parts: &mut KeyboardParts,
 ) {
+    let KeyboardParts { gkeys, painter, updates } = parts;
     let name = link.label();
     let wireless = link == Link::KeyboardReceiver;
     if wireless {
@@ -674,6 +712,21 @@ fn keyboard_loop(
                     painter.paint(ch, dev, name);
                 } else {
                     painter.forget();
+                }
+            }
+            Ok(Some(Event::Control(UPDATE))) => {
+                let new = updates.lock().unwrap_or_else(|e| e.into_inner()).take();
+                if let Some(s) = new {
+                    debug!("{name}: new settings, applied in place");
+                    if gkeys.update(ch, dev, s.gkeys, connected) {
+                        // A mode switch wiped the keyboard's lighting.
+                        painter.forget();
+                    }
+                    painter.own = s.layout;
+                    painter.overlay = gkeys.indicator();
+                    if connected {
+                        painter.paint(ch, dev, name);
+                    }
                 }
             }
             Ok(Some(Event::Control(_))) => {

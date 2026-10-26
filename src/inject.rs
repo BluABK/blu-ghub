@@ -190,30 +190,36 @@ pub fn up(k: Key) -> std::io::Result<()> {
 
 /// Type `text`: each character as Unicode (two UTF-16 units for one outside
 /// the basic plane), except a line break, which presses Enter, and a tab,
-/// which presses Tab.
+/// which presses Tab. In one go: Windows takes it whole.
+///
+/// Windows 11's Notepad shows some of it cut short or garbled ("Testing G1
+/// on" for "Testing G1 on M1", now and then a wrong character), sent at
+/// once or a character at a time; other programs (a search box, a
+/// browser) show all of it at any pace.
 pub fn text(text: &str) -> std::io::Result<()> {
     send(&text_inputs(text))
 }
 
 fn text_inputs(text: &str) -> Vec<INPUT> {
+    text.chars().flat_map(char_inputs).collect()
+}
+
+/// One character's key events: down and up, for each UTF-16 unit.
+fn char_inputs(ch: char) -> Vec<INPUT> {
+    let special = match ch {
+        '\n' => from_usage(0x28),
+        '\t' => from_usage(0x2B),
+        '\r' => return Vec::new(),
+        _ => None,
+    };
+    if let Some(k) = special {
+        return vec![key_input(k, false), key_input(k, true)];
+    }
+    let mut units = [0u16; 2];
     let mut out = Vec::new();
-    for ch in text.chars() {
-        let special = match ch {
-            '\n' => from_usage(0x28),
-            '\t' => from_usage(0x2B),
-            '\r' => continue,
-            _ => None,
-        };
-        if let Some(k) = special {
-            out.push(key_input(k, false));
-            out.push(key_input(k, true));
-            continue;
-        }
-        let mut units = [0u16; 2];
-        for &unit in ch.encode_utf16(&mut units).iter() {
-            out.push(input(VIRTUAL_KEY(0), unit, KEYEVENTF_UNICODE));
-            out.push(input(VIRTUAL_KEY(0), unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP));
-        }
+    for &unit in ch.encode_utf16(&mut units).iter() {
+        out.push(input(VIRTUAL_KEY(0), unit, KEYEVENTF_UNICODE));
+        out.push(input(VIRTUAL_KEY(0), unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP));
     }
     out
 }

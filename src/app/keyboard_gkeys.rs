@@ -87,6 +87,12 @@ pub fn emergency_hand_back() {
 const ONBOARD_MODE: u8 = 0x01;
 const HOST_MODE: u8 = 0x02;
 
+/// After switching back to on-board mode, the keyboard is given this long
+/// before the G-keys are taken again: taken at once, its own profile also
+/// answered the first press (seen once: a G-key typed its on-board key
+/// over blu-ghub's text).
+const MODE_SETTLE: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// Where a profile sector keeps G1-G5's bindings, 4 bytes each.
 const BUTTONS_AT: u16 = 32;
 
@@ -274,18 +280,39 @@ impl Takeover {
         // Before host mode: the profile in use is the bank to start from.
         self.bank_now(ch, dev);
         if self.setup.gkeys.light_m_keys {
-            match ch.request(dev, o, 1, &[HOST_MODE]) {
-                Ok(_) => {
-                    self.host = true;
-                    *taken() =
-                        Some(Taken { raw: ch.raw_long_handle(), dev, gkey: g, host: Some(o) });
-                    info!("G915: host mode, for the M lights");
-                    self.light(ch, dev);
-                }
-                Err(e) => warn!("G915: could not switch to host mode for the M lights: {e}"),
-            }
+            self.enter_host(ch, dev);
         }
         Ok(())
+    }
+
+    /// Host mode, so the M lights can be lit, and the bank's lit.
+    fn enter_host(&mut self, ch: &mut Channel, dev: u8) {
+        let (Some(g), Some(o)) = (self.gkey, self.onboard) else { return };
+        match ch.request(dev, o, 1, &[HOST_MODE]) {
+            Ok(_) => {
+                self.host = true;
+                *taken() = Some(Taken { raw: ch.raw_long_handle(), dev, gkey: g, host: Some(o) });
+                info!("G915: host mode, for the M lights");
+                self.light(ch, dev);
+            }
+            Err(e) => warn!("G915: could not switch to host mode for the M lights: {e}"),
+        }
+    }
+
+    /// Back to on-board mode, if blu-ghub left it.
+    fn leave_host(&mut self, ch: &mut Channel, dev: u8) {
+        let (true, Some(o)) = (self.host, self.onboard) else { return };
+        match ch.request(dev, o, 1, &[ONBOARD_MODE]) {
+            Ok(_) => info!("G915: on-board mode again"),
+            Err(e) => warn!(
+                "G915: could not switch back to on-board mode ({e}); switching the keyboard \
+                 off and on does"
+            ),
+        }
+        self.host = false;
+        if let Some(t) = taken().as_mut() {
+            t.host = None;
+        }
     }
 
     /// At the first contact: a keyboard left in host mode (by a run that
@@ -296,7 +323,10 @@ impl Takeover {
         match ch.request(dev, o, 2, &[]) {
             Ok(p) if p.first() == Some(&HOST_MODE) && !self.host_wanted() => {
                 match ch.request(dev, o, 1, &[ONBOARD_MODE]) {
-                    Ok(_) => info!("G915: the keyboard was left in host mode; back to on-board"),
+                    Ok(_) => {
+                        info!("G915: the keyboard was left in host mode; back to on-board");
+                        std::thread::sleep(MODE_SETTLE);
+                    }
                     Err(e) => warn!("G915: the keyboard is in host mode and stays there: {e}"),
                 }
             }
@@ -455,12 +485,18 @@ impl Takeover {
     /// On quit: let go of everything and hand the keys back.
     pub fn release(&mut self, ch: &mut Channel, dev: u8) {
         self.runner = None;
-        *taken() = None;
-        if !(self.attempted || self.diverted) {
-            return;
+        if self.attempted || self.diverted || self.host {
+            self.let_go(ch, dev);
         }
-        let ghub = crate::platform::ghub_running();
-        if ghub {
+        *taken() = None;
+    }
+
+    /// Hand the G-keys back, and on-board mode if blu-ghub left it.
+    fn let_go(&mut self, ch: &mut Channel, dev: u8) {
+        if let Some(r) = &self.runner {
+            r.send(Cmd::ReleaseAll);
+        }
+        if crate::platform::ghub_running() {
             info!("G915: G HUB is running; leaving the G-keys to it");
         } else if let Some(g) = self.gkey {
             match ch.request(dev, g, 2, &[0x00]) {
@@ -469,18 +505,75 @@ impl Takeover {
             }
         }
         self.diverted = false;
+        self.attempted = false;
+        self.mask = 0;
         // On-board mode back whatever runs: it is the keyboard's normal.
-        if self.host
-            && let Some(o) = self.onboard
-        {
-            match ch.request(dev, o, 1, &[ONBOARD_MODE]) {
-                Ok(_) => info!("G915: on-board mode again"),
-                Err(e) => warn!(
-                    "G915: could not switch back to on-board mode ({e}); switching the keyboard \
-                     off and on does"
-                ),
+        self.leave_host(ch, dev);
+        *taken() = None;
+    }
+
+    /// New settings while running: send only what they change. Different
+    /// actions or macros send nothing; keys no longer wanted are handed
+    /// back, newly wanted ones taken, and host mode follows `light_m_keys`.
+    /// While the keyboard sleeps nothing is sent; its wake sorts it out.
+    ///
+    /// `true` when the keyboard's mode changed: that wipes its lighting
+    /// (the claim and painted keys; seen on this keyboard), so the caller
+    /// paints afresh.
+    pub fn update(&mut self, ch: &mut Channel, dev: u8, setup: Setup, connected: bool) -> bool {
+        for m in &setup.macros {
+            for p in m.problems() {
+                warn!("G915: {p}");
             }
-            self.host = false;
+        }
+        self.setup = setup;
+        // A held key's action may have changed under it.
+        if let Some(r) = &self.runner {
+            r.send(Cmd::ReleaseAll);
+        }
+        self.mask = 0;
+        self.failed = false;
+        self.unsupported_said.clear();
+        let wanted = self.setup.gkeys.wanted();
+        if !connected {
+            if !wanted {
+                self.cleared = false;
+                self.mode_checked = false;
+            }
+            return false;
+        }
+        let was_host = self.host;
+        if self.diverted && !wanted {
+            self.let_go(ch, dev);
+            self.cleared = true;
+        } else if self.diverted && self.setup.gkeys.light_m_keys != self.host {
+            // Switching the mode under the taken keys leaves the keyboard's
+            // M lights and lighting in a muddle (seen: its own profile's M
+            // lit, or everything dark), so the whole takeover is redone,
+            // keeping the bank.
+            self.retake(ch, dev);
+        } else if !self.diverted {
+            self.settle(ch, dev);
+        }
+        was_host != self.host
+    }
+
+    /// Let go and take the keys again, in the bank blu-ghub was in.
+    fn retake(&mut self, ch: &mut Channel, dev: u8) {
+        let bank = self.bank;
+        let was_host = self.host;
+        self.let_go(ch, dev);
+        if was_host {
+            std::thread::sleep(MODE_SETTLE);
+        }
+        if let Err(e) = self.take(ch, dev) {
+            warn!("G915: could not take the G-keys over again: {e:#}");
+            self.failed = true;
+            return;
+        }
+        if self.bank != bank {
+            self.bank = bank;
+            self.light(ch, dev);
         }
     }
 }

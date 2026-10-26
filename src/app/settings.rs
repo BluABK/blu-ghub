@@ -348,12 +348,17 @@ impl eframe::App for Settings {
                 }
             });
         });
-        // The layout on the keyboard while it is being edited.
+        // The layout on the keyboard while it is being edited, if it is the
+        // one to be shown: with "its stored layout" picked, the keyboard
+        // shows what Save will give.
         let focused = ui.ctx().input(|i| i.viewport().focused).unwrap_or(true);
-        let keys = &self.draft.keyboard.lighting.keys;
-        let wanted =
-            (self.tab == Tab::Keyboard && self.editor.preview && focused && !keys.is_empty())
-                .then(|| self.draft.keyboard.lighting.frame());
+        let l = &self.draft.keyboard.lighting;
+        let wanted = (self.tab == Tab::Keyboard
+            && self.editor.preview
+            && focused
+            && l.show == ShowLayout::Layout
+            && !l.keys.is_empty())
+        .then(|| l.frame());
         self.editor.send_preview(ui.ctx(), wanted);
     }
 }
@@ -425,8 +430,9 @@ impl Settings {
         ui.horizontal(|ui| {
             ui.checkbox(&mut self.editor.preview, "Show the changes on the keyboard while editing")
                 .on_hover_text(
-                    "While this tab is open and the window has the focus. Painted into the \
-                     keyboard's memory only; leaving the tab shows the saved choice again.",
+                    "While this tab is open, the window has the focus and \"this layout\" is \
+                     picked. Painted into the keyboard's memory only; leaving the tab shows the \
+                     saved choice again.",
                 );
         });
         ui.add_space(4.0);
@@ -670,6 +676,25 @@ impl Settings {
             if ui.add_enabled(changed, egui::Button::new("Undo changes")).clicked() {
                 self.draft = self.saved.clone();
                 self.note = None;
+            }
+            if ui
+                .button("Re-apply to the devices")
+                .on_hover_text(
+                    "Hands everything back to the keyboard and headset and takes it again, \
+                     painting from nothing, with the saved settings: for when a device shows \
+                     something other than they say. Save applies changes without this.",
+                )
+                .clicked()
+            {
+                unsafe {
+                    let _ = PostMessageW(
+                        Some(HWND(self.tray as *mut _)),
+                        super::WM_APP_REAPPLY,
+                        WPARAM(0),
+                        LPARAM(0),
+                    );
+                }
+                self.note = Some(("Re-applied to the devices.".into(), false));
             }
         });
         if let Some((text, error)) = &self.note {

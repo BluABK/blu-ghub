@@ -31,6 +31,7 @@ G935: 76%
 ---------------------
 Settings…
 Read batteries now
+Re-apply to the devices
 Start with Windows
 Open log folder
 ---------------------
@@ -39,12 +40,20 @@ Quit
 
 **Settings…** opens a window with each device's state, battery, voltage and
 the time of the reading, the G915 layout editor (below), and the settings
-below: the G935's buttons and lighting, the low-battery warning, how often batteries are read, how long logs are kept,
-and Start with Windows. Save applies them at once (a changed button hands
-the headset's buttons back and takes them again). Saving rewrites the
-config file, so comments written in it by hand do not survive; the version
-replaced is kept as `BluGHub.toml.bak`. A file that could not be read when
-BluGHub started is never saved over.
+below: the G915's G-keys, the G935's buttons and lighting, the low-battery
+warning, how often batteries are read, how long logs are kept, and Start
+with Windows. Save applies them at once. The keyboard's settings are applied
+in place, sending only what changed (new colours repaint those keys, new
+G-key actions send nothing); a changed headset button hands the headset's
+buttons back and takes them again. Saving rewrites the config file, so
+comments written in it by hand do not survive; the version replaced is kept
+as `BluGHub.toml.bak`. A file that could not be read when BluGHub started is
+never saved over.
+
+**Re-apply to the devices** (in the window and the tray menu) hands
+everything back to both devices and takes it again with the saved settings,
+painting the keyboard from nothing: for when a device shows something other
+than the settings say.
 
 The window exists only while it is open: closing it frees its renderer, and
 the Direct3D driver hands its memory back some seconds later. While open and
@@ -182,10 +191,10 @@ minutes, but no longer dims after one. It is painted into the keyboard's
 memory only, so nothing is stored: without blu-ghub running, and for a
 moment at each wake, the keyboard shows its stored layout.
 
-While the *G915 layout* tab is open and the window has the focus, the
-layout being edited is shown on the keyboard, only the keys that changed,
-at most ten times a second. Leaving the tab shows the saved choice again at
-once. Storing a layout in the keyboard itself is not done.
+While the *G915 layout* tab is open, the window has the focus and *this
+layout* is picked, the layout being edited is shown on the keyboard as it
+is (G-keys included), only the keys that changed, at most ten times a
+second. Leaving the tab shows the saved choice again at once. Storing a layout in the keyboard itself is not done.
 
 Key names follow the key's position on a US layout (`semicolon` is Ø on a
 Nordic board); the full list is in `src/keymap.rs`.
@@ -229,6 +238,8 @@ as a `toggle` from one press to the next; one runs at a time, and any key
 it left down is released when it ends. The settings window picks the
 actions; macros are written in the file for now. Typing goes in as if from
 a keyboard, so it does not reach a window running as administrator.
+Windows 11's Notepad sometimes shows typed text cut short or garbled;
+other programs show all of it.
 
 **Headset lighting.** A zone with no `[headset.lighting.*]` section is never
 written and shows whatever the headset does by itself. A configured one is

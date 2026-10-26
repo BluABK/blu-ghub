@@ -82,6 +82,9 @@ const WM_APP_LOCKED: u32 = WM_APP + 5;
 const WM_APP_SETTINGS: u32 = WM_APP + 6;
 /// The settings window saved the config: read it again and apply it.
 pub(super) const WM_APP_CONFIG: u32 = WM_APP + 7;
+/// Re-apply everything to the devices from scratch (the settings window's
+/// button, or the tray menu).
+pub(super) const WM_APP_REAPPLY: u32 = WM_APP + 8;
 
 const TRAY_ID: u32 = 1;
 /// Hotplug sends a burst of arrivals (one per HID collection); act once, a
@@ -103,6 +106,7 @@ const IDM_LOGS: usize = 11;
 const IDM_REFRESH: usize = 12;
 const IDM_QUIT: usize = 13;
 const IDM_SETTINGS: usize = 14;
+const IDM_REAPPLY: usize = 15;
 
 struct App {
     hwnd: HWND,
@@ -141,6 +145,14 @@ static HANDED_LOCK: Mutex<Option<HidppLock>> = Mutex::new(None);
 /// Run `f` on the app state. If it is already borrowed further up the stack
 /// (a message dispatched from inside a call that pumps), skip rather than
 /// panic: a skipped redraw is harmless, an abort is not.
+/// What the keyboard's worker is to do, from the settings.
+fn keyboard_setup(c: &Config) -> devices::KeyboardSetup {
+    devices::KeyboardSetup {
+        gkeys: keyboard_gkeys::Setup { gkeys: c.keyboard.gkeys.clone(), macros: c.macros.clone() },
+        layout: c.keyboard.lighting.shown(),
+    }
+}
+
 fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
     APP.with(|a| match a.try_borrow_mut() {
         Ok(mut a) => a.as_mut().map(f),
@@ -496,6 +508,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             with_app(|a| a.reload_config());
             LRESULT(0)
         }
+        WM_APP_REAPPLY => {
+            with_app(|a| a.reapply());
+            LRESULT(0)
+        }
         WM_APP_SETTINGS => {
             match wparam.0 {
                 0 => {
@@ -815,13 +831,7 @@ impl App {
             }
             let rep = Reporter { shared: self.shared.clone(), hwnd: self.hwnd.0 as isize };
             let headset = self.config.headset.clone();
-            let keyboard = devices::KeyboardSetup {
-                gkeys: keyboard_gkeys::Setup {
-                    gkeys: self.config.keyboard.gkeys.clone(),
-                    macros: self.config.macros.clone(),
-                },
-                layout: self.config.keyboard.lighting.shown(),
-            };
+            let keyboard = keyboard_setup(&self.config);
             if let Some(w) = devices::start(link, &all, rep, poll, headset, keyboard) {
                 self.workers.push(w);
             }
@@ -875,28 +885,47 @@ impl App {
         let old = std::mem::replace(&mut self.config, new);
         let poll = old.settings.battery_check_minutes != self.config.settings.battery_check_minutes;
         let buttons = old.headset != self.config.headset;
-        let gkeys = old.keyboard.gkeys != self.config.keyboard.gkeys
-            || old.macros != self.config.macros
-            || old.keyboard.lighting.shown() != self.config.keyboard.lighting.shown();
+        let keyboard = keyboard_setup(&old) != keyboard_setup(&self.config);
         info!(
-            "settings saved{}",
-            if poll || buttons || gkeys { "; restarting workers" } else { "" }
+            "settings saved{}{}",
+            if poll || buttons { "; restarting workers" } else { "" },
+            if keyboard && !poll { "; keyboard settings applied in place" } else { "" }
         );
-        let (stop, keep): (Vec<Worker>, Vec<Worker>) =
-            std::mem::take(&mut self.workers).into_iter().partition(|w| {
-                poll || (buttons && w.link == Link::Headset) || (gkeys && w.link != Link::Headset)
-            });
+        let (stop, keep): (Vec<Worker>, Vec<Worker>) = std::mem::take(&mut self.workers)
+            .into_iter()
+            .partition(|w| poll || (buttons && w.link == Link::Headset));
         self.workers = keep;
         for w in stop {
             w.stop();
+        }
+        if keyboard {
+            let setup = keyboard_setup(&self.config);
+            for w in &self.workers {
+                w.update_keyboard(setup.clone());
+            }
         }
         self.reconcile_workers();
         // The low-battery level applies from the next reading on.
         self.warned_low = [false; 2];
     }
 
+    /// Everything back to the devices and taken again, painted from
+    /// nothing: for when a device shows something other than the
+    /// settings say.
+    fn reapply(&mut self) {
+        if self.shut_down {
+            return;
+        }
+        info!("re-applying the settings to the devices from scratch");
+        for w in std::mem::take(&mut self.workers) {
+            w.stop();
+        }
+        self.reconcile_workers();
+    }
+
     fn on_command(&mut self, cmd: usize) {
         match cmd {
+            IDM_REAPPLY => self.reapply(),
             IDM_REFRESH => {
                 // Also picks up a device whose worker could not start.
                 self.reconcile_workers();
@@ -928,6 +957,7 @@ fn show_menu(hwnd: HWND, status: &Status, at: POINT) -> usize {
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         let _ = AppendMenuW(menu, MF_STRING, IDM_SETTINGS, w!("Settings…"));
         let _ = AppendMenuW(menu, MF_STRING, IDM_REFRESH, w!("Read batteries now"));
+        let _ = AppendMenuW(menu, MF_STRING, IDM_REAPPLY, w!("Re-apply to the devices"));
         let autostart = if platform::starts_with_windows() { MF_CHECKED } else { MF_STRING };
         let _ = AppendMenuW(menu, MF_STRING | autostart, IDM_AUTOSTART, w!("Start with Windows"));
         let _ = AppendMenuW(menu, MF_STRING, IDM_LOGS, w!("Open log folder"));
