@@ -144,6 +144,12 @@ cannot be read back: 0x8081 has no get function (`BluGHub-diag slots`).
 - **On hand-back**, the keyboard lights its own profile's M key again, and
   the M keys switch profiles as before.
 
+**Host mode (0x8100 fn1 `[02]`, back with `[01]`; fn2 reads it), tried once:**
+switching both ways reads back at once. In host mode the keys and F-row type
+as usual (F5 is F5), the lighting shown stays and a painted key shows over it,
+the G-keys and M keys do nothing, and the M lights go out; 0x8020 fn1 is
+accepted but shows nothing there either (G-keys not taken at the time).
+
 A profile sector's G1-G5 bindings sit at offset 32 (below); blu-ghub reads
 all three profiles' bindings when it takes the keys, so a key it leaves to
 the keyboard types what the bank's profile has.

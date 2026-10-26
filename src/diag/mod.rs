@@ -4,6 +4,7 @@
 //! under `%APPDATA%\BluGHub\diag\`, so a run can be left going and read later.
 
 pub mod caps;
+pub mod host;
 pub mod keys;
 pub mod light;
 pub mod onboard;
