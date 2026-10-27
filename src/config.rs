@@ -80,6 +80,16 @@ pub struct Headset {
     /// leaves it as it is.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub equaliser: Option<Vec<f32>>,
+    /// Equaliser curves saved by name, offered beside blu-ghub's own.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub eq_presets: Vec<EqPreset>,
+}
+
+/// An equaliser curve saved by name: a gain in dB for each band.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EqPreset {
+    pub name: String,
+    pub gains: Vec<f32>,
 }
 
 /// The headset's sidetone: on, `level` (0-100) is set at each power-on;
@@ -189,12 +199,28 @@ impl Config {
         if let Some(s) = &mut self.headset.sidetone {
             s.level = s.level.min(100);
         }
-        if let Some(eq) = &mut self.headset.equaliser {
+        let gains = |eq: &mut Vec<f32>| {
             eq.resize(10, 0.0);
             for g in eq.iter_mut() {
                 *g = if g.is_finite() { g.clamp(-12.0, 12.0) } else { 0.0 };
             }
+        };
+        if let Some(eq) = &mut self.headset.equaliser {
+            gains(eq);
         }
+        let mut names = std::collections::HashSet::new();
+        self.headset.eq_presets.retain_mut(|p| {
+            p.name = p.name.trim().to_owned();
+            let keep = !p.name.is_empty() && names.insert(p.name.to_lowercase());
+            if !keep {
+                tracing::warn!(
+                    "config: headset.eq_presets: {:?} unnamed or twice; left out",
+                    p.name
+                );
+            }
+            gains(&mut p.gains);
+            keep
+        });
         let l = &mut self.headset.lighting;
         l.sides = l.sides.map(|z| z.sanitized());
         l.logo = l.logo.map(|z| z.sanitized());
@@ -373,6 +399,25 @@ mod tests {
         assert_eq!(Config::default().headset.sidetone, None);
         let again: Config = toml::from_str(&toml::to_string(&c).unwrap()).unwrap();
         assert_eq!(again, c);
+    }
+
+    #[test]
+    fn eq_presets_are_named_once_and_kept_in_range() {
+        let c: Config = toml::from_str(
+            "[headset]\nequaliser = [1.0]\n\n[[headset.eq_presets]]\nname = \" Night \"\ngains = \
+             [20.0, -3.5]\n\n[[headset.eq_presets]]\nname = \"night\"\ngains = []\n\n\
+             [[headset.eq_presets]]\nname = \"\"\ngains = []\n",
+        )
+        .unwrap();
+        let c = c.sanitized();
+        assert_eq!(c.headset.eq_presets.len(), 1);
+        let p = &c.headset.eq_presets[0];
+        assert_eq!(p.name, "Night");
+        assert_eq!(p.gains.len(), 10);
+        assert_eq!(p.gains[..3], [12.0, -3.5, 0.0]);
+        let again: Config = toml::from_str(&toml::to_string(&c).unwrap()).unwrap();
+        assert_eq!(again, c);
+        assert!(Config::default().headset.eq_presets.is_empty());
     }
 
     #[test]

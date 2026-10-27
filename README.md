@@ -77,6 +77,13 @@ time playback starts (stop and play; pausing is not enough). It is set the
 way Windows' Sound control panel sets effects, without administrator
 rights; `BluGHub-diag apo-eq` shows it, and can set and restore it.
 
+Under the bands is what part of the sound each is (sub-bass, bass, low
+mids, mids, high mids, presence, treble, air); hovering a band says what is
+heard there. The preset list has blu-ghub's own curves (Flat, Bass boost,
+Treble boost, Voice, V-shape, Cinema, Footsteps) and yours: *Save as
+preset* names the curve shown, and Save keeps it under
+`[[headset.eq_presets]]` (see the example below).
+
 **Re-apply to the devices** (in the window and the tray menu) hands
 everything back to both devices and takes it again with the saved settings,
 painting the keyboard from nothing: for when a device shows something other
@@ -203,6 +210,10 @@ effect = "off"
 [headset.sidetone]           # set at each power-on; left out: the headset's own
 on = true                    # false: off (0), the level kept
 level = 20                   # 0-100
+
+[[headset.eq_presets]]       # your own equaliser presets, beside blu-ghub's
+name = "Late night"
+gains = [-2.0, -1.0, 0.0, 0.0, 1.0, 1.5, 1.0, 0.0, -1.0, -1.5]   # dB, 40 Hz up
 ```
 
 **Keyboard lighting.** The G915 plays a layout stored in itself.

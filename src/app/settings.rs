@@ -240,6 +240,8 @@ struct Settings {
     show_ids: bool,
     /// The equaliser band being dragged.
     eq_drag: Option<usize>,
+    /// The name typed for saving the equaliser as a preset, while saving.
+    eq_preset_name: Option<String>,
     macro_editor: super::macro_editor::MacroEditor,
     /// An open file dialog: for which (bank, key), and its answer.
     browsing: Option<((usize, usize), FileAnswer)>,
@@ -272,6 +274,7 @@ impl Settings {
             gkey_bank: 0,
             show_ids: false,
             eq_drag: None,
+            eq_preset_name: None,
             macro_editor: Default::default(),
             browsing: None,
             opened: Instant::now(),
@@ -823,13 +826,89 @@ impl Settings {
                     super::devices::preview_eq(None);
                 }
             }
-            if let Some(g) = &mut h.equaliser
-                && ui.button("Flat").clicked()
-            {
-                g.iter_mut().for_each(|x| *x = 0.0);
+            let Some(g) = &mut h.equaliser else { return };
+            use super::eq_presets;
+            let now = eq_presets::matching(g, &freqs, &h.eq_presets);
+            let mut pick: Option<Vec<f32>> = None;
+            egui::ComboBox::from_id_salt("eq-preset")
+                .selected_text(now.as_deref().unwrap_or("Your own curve"))
+                .width(150.0)
+                .show_ui(ui, |ui| {
+                    for s in &eq_presets::STANDARD {
+                        let on = now.as_deref() == Some(s.name);
+                        if ui.selectable_label(on, s.name).on_hover_text(s.about).clicked() {
+                            pick = Some(s.gains(&freqs));
+                        }
+                    }
+                    if !h.eq_presets.is_empty() {
+                        ui.separator();
+                    }
+                    for p in &h.eq_presets {
+                        let on = now.as_deref() == Some(p.name.as_str());
+                        if ui.selectable_label(on, &p.name).clicked() {
+                            pick = Some(p.gains.clone());
+                        }
+                    }
+                })
+                .response
+                .on_hover_text("blu-ghub's presets, then your own.");
+            if let Some(p) = pick {
+                *g = p;
                 super::devices::preview_eq(Some(g.clone()));
             }
+            let own = now.as_ref().filter(|n| !eq_presets::is_standard(n));
+            if self.eq_preset_name.is_none() {
+                if now.is_none()
+                    && ui
+                        .button("Save as preset")
+                        .on_hover_text("Keep this curve by name, in the list beside blu-ghub's.")
+                        .clicked()
+                {
+                    self.eq_preset_name = Some(String::new());
+                }
+                if let Some(name) = own
+                    && ui.button("Delete preset").on_hover_text("Save keeps it deleted.").clicked()
+                {
+                    h.eq_presets.retain(|p| &p.name != name);
+                }
+            }
         });
+        if let (Some(name), Some(g)) = (&mut self.eq_preset_name, &h.equaliser) {
+            let mut done = false;
+            ui.horizontal(|ui| {
+                ui.label("Preset name");
+                let field = ui.add(egui::TextEdit::singleline(name).desired_width(160.0));
+                if field.gained_focus() || name.is_empty() {
+                    field.request_focus();
+                }
+                let trimmed = name.trim().to_owned();
+                let clash = super::eq_presets::is_standard(&trimmed);
+                let replaces = h.eq_presets.iter().any(|p| p.name.eq_ignore_ascii_case(&trimmed));
+                let ok = !trimmed.is_empty() && !clash;
+                let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if ui
+                    .add_enabled(ok, egui::Button::new(if replaces { "Replace" } else { "Keep" }))
+                    .clicked()
+                    || (ok && enter)
+                {
+                    h.eq_presets.retain(|p| !p.name.eq_ignore_ascii_case(&trimmed));
+                    h.eq_presets.push(crate::config::EqPreset { name: trimmed, gains: g.clone() });
+                    done = true;
+                } else if ui.button("Cancel").clicked() {
+                    done = true;
+                } else if clash {
+                    ui.label(
+                        egui::RichText::new("That is one of blu-ghub's.")
+                            .color(ui.visuals().warn_fg_color),
+                    );
+                } else {
+                    ui.label(egui::RichText::new("Save keeps it in the config.").weak());
+                }
+            });
+            if done {
+                self.eq_preset_name = None;
+            }
+        }
         let range = (-12.0, 12.0);
         match &mut h.equaliser {
             Some(g) => {

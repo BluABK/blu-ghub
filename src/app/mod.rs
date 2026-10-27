@@ -15,6 +15,7 @@
 
 pub mod details;
 pub mod devices;
+mod eq_presets;
 mod eq_widget;
 mod keyboard_editor;
 pub mod keyboard_gkeys;
