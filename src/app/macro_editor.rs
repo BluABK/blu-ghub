@@ -2,8 +2,9 @@
 //! step by step, for the G-keys to run.
 //!
 //! Renaming a macro renames it where the G-keys use it; one in use cannot
-//! be deleted. Nothing here records key presses: blu-ghub watches no
-//! keyboard input.
+//! be deleted. "Record" turns keys pressed in this window, while it has the
+//! focus, into steps: the window's own key messages, as any text field gets
+//! them, not a hook or raw input; nothing is watched outside the window.
 
 use crate::gkeys::{GAction, GKeys, Macro, MacroMode, Step};
 use crate::input::ButtonAction;
@@ -20,6 +21,171 @@ pub struct MacroEditor {
     /// follows into the G-keys only once it is unique, so passing through
     /// another macro's name while typing cannot merge the two.
     name_used: Option<(usize, String)>,
+    /// Keys pressed while recording, and whether pauses become waits.
+    recording: Option<Recording>,
+    record_pauses: bool,
+}
+
+/// Keys pressed in the window while recording, as (seconds, key, down).
+#[derive(Default)]
+struct Recording {
+    events: Vec<(f64, &'static str, bool)>,
+    down: Vec<&'static str>,
+}
+
+impl Recording {
+    fn key(&mut self, at: f64, name: &'static str, pressed: bool) {
+        if pressed {
+            if !self.down.contains(&name) {
+                self.down.push(name);
+                self.events.push((at, name, true));
+            }
+        } else if let Some(i) = self.down.iter().position(|d| *d == name) {
+            self.down.remove(i);
+            self.events.push((at, name, false));
+        } else {
+            // A release without its press: Ctrl+C, X and V reach the window
+            // as copy, cut and paste, not as their key's press.
+            self.events.push((at, name, true));
+            self.events.push((at, name, false));
+        }
+    }
+
+    /// The steps: a press let go before anything else happened is a tap;
+    /// keys still down at the end are let go. With `pauses`, a gap of 30 ms
+    /// or more becomes a wait (to 10 ms).
+    fn steps(mut self, pauses: bool, at_end: f64) -> Vec<Step> {
+        for name in std::mem::take(&mut self.down) {
+            self.events.push((at_end, name, false));
+        }
+        let mut out = Vec::new();
+        let mut last: Option<f64> = None;
+        let mut i = 0;
+        while i < self.events.len() {
+            let (t, name, down) = self.events[i];
+            if pauses && let Some(prev) = last {
+                let ms = ((t - prev) * 1000.0 / 10.0).round() as u32 * 10;
+                if ms >= 30 {
+                    out.push(Step::Delay(ms));
+                }
+            }
+            let tap = down && self.events.get(i + 1).is_some_and(|(_, n, d)| *n == name && !*d);
+            if tap {
+                out.push(Step::Tap(name.to_owned()));
+                last = Some(self.events[i + 1].0);
+                i += 2;
+            } else {
+                out.push(if down { Step::Down(name.into()) } else { Step::Up(name.into()) });
+                last = Some(t);
+                i += 1;
+            }
+        }
+        out
+    }
+}
+
+/// blu-ghub's name for a key the window saw, by its position (US names, as
+/// the rest of the config).
+fn key_name(k: egui::Key) -> Option<&'static str> {
+    use egui::Key as K;
+    Some(match k {
+        K::A => "a",
+        K::B => "b",
+        K::C => "c",
+        K::D => "d",
+        K::E => "e",
+        K::F => "f",
+        K::G => "g",
+        K::H => "h",
+        K::I => "i",
+        K::J => "j",
+        K::K => "k",
+        K::L => "l",
+        K::M => "m",
+        K::N => "n",
+        K::O => "o",
+        K::P => "p",
+        K::Q => "q",
+        K::R => "r",
+        K::S => "s",
+        K::T => "t",
+        K::U => "u",
+        K::V => "v",
+        K::W => "w",
+        K::X => "x",
+        K::Y => "y",
+        K::Z => "z",
+        K::Num0 => "0",
+        K::Num1 => "1",
+        K::Num2 => "2",
+        K::Num3 => "3",
+        K::Num4 => "4",
+        K::Num5 => "5",
+        K::Num6 => "6",
+        K::Num7 => "7",
+        K::Num8 => "8",
+        K::Num9 => "9",
+        K::F1 => "f1",
+        K::F2 => "f2",
+        K::F3 => "f3",
+        K::F4 => "f4",
+        K::F5 => "f5",
+        K::F6 => "f6",
+        K::F7 => "f7",
+        K::F8 => "f8",
+        K::F9 => "f9",
+        K::F10 => "f10",
+        K::F11 => "f11",
+        K::F12 => "f12",
+        K::F13 => "f13",
+        K::F14 => "f14",
+        K::F15 => "f15",
+        K::F16 => "f16",
+        K::F17 => "f17",
+        K::F18 => "f18",
+        K::F19 => "f19",
+        K::F20 => "f20",
+        K::F21 => "f21",
+        K::F22 => "f22",
+        K::F23 => "f23",
+        K::F24 => "f24",
+        K::Escape => "esc",
+        K::Tab => "tab",
+        K::Backspace => "backspace",
+        K::Enter => "enter",
+        K::Space => "space",
+        K::Insert => "insert",
+        K::Delete => "delete",
+        K::Home => "home",
+        K::End => "end",
+        K::PageUp => "page_up",
+        K::PageDown => "page_down",
+        K::ArrowLeft => "left",
+        K::ArrowRight => "right",
+        K::ArrowUp => "up",
+        K::ArrowDown => "down",
+        K::Minus => "minus",
+        K::Equals | K::Plus => "equal",
+        K::OpenBracket => "left_bracket",
+        K::CloseBracket => "right_bracket",
+        K::Backslash => "non_us_hash",
+        K::Semicolon => "semicolon",
+        K::Quote => "apostrophe",
+        K::Backtick => "grave",
+        K::Comma => "comma",
+        K::Period => "period",
+        K::Slash => "slash",
+        K::IntlBackslash => "non_us_backslash",
+        K::ShiftLeft => "left_shift",
+        K::ShiftRight => "right_shift",
+        K::ControlLeft => "left_ctrl",
+        K::ControlRight => "right_ctrl",
+        K::AltLeft => "left_alt",
+        K::AltRight => "right_alt",
+        K::SuperLeft => "left_win",
+        K::SuperRight => "right_win",
+        _ => return None,
+    })
 }
 
 const KINDS: [&str; 8] = [
@@ -261,9 +427,61 @@ impl MacroEditor {
             }
             _ => {}
         }
-        if ui.button("Add step").clicked() {
-            let next = m.steps.last().map_or(Step::Tap("a".into()), |s| step_of_kind(kind(s), s));
-            m.steps.push(next);
+        ui.horizontal(|ui| {
+            if ui.button("Add step").clicked() {
+                let next =
+                    m.steps.last().map_or(Step::Tap("a".into()), |s| step_of_kind(kind(s), s));
+                m.steps.push(next);
+            }
+            if self.recording.is_none() {
+                if ui
+                    .button("Record")
+                    .on_hover_text(
+                        "Press keys in this window and they become steps, added at the end. \
+                         Only this window's keys are seen, while it has the focus.",
+                    )
+                    .clicked()
+                {
+                    self.recording = Some(Recording::default());
+                }
+                ui.checkbox(&mut self.record_pauses, "Record pauses as waits");
+                if !m.steps.is_empty() && ui.button("Clear steps").clicked() {
+                    m.steps.clear();
+                }
+            } else if ui.button("Stop recording").clicked() {
+                let now = ui.input(|i| i.time);
+                if let Some(r) = self.recording.take() {
+                    m.steps.extend(r.steps(self.record_pauses, now));
+                }
+            }
+        });
+        if let Some(r) = &mut self.recording {
+            // Take the window's key events, so no button or field acts on
+            // them while recording.
+            ui.input_mut(|i| {
+                let at = i.time;
+                i.events.retain(|e| match e {
+                    egui::Event::Key { key, physical_key, pressed, repeat, .. } => {
+                        if !repeat && let Some(name) = key_name(physical_key.unwrap_or(*key)) {
+                            r.key(at, name, *pressed);
+                        }
+                        false
+                    }
+                    egui::Event::Text(_)
+                    | egui::Event::Copy
+                    | egui::Event::Cut
+                    | egui::Event::Paste(_) => false,
+                    _ => true,
+                });
+            });
+            let n = r.events.len();
+            ui.label(
+                egui::RichText::new(format!(
+                    "Recording: press keys ({n} key event{} so far), then Stop recording.",
+                    if n == 1 { "" } else { "s" }
+                ))
+                .color(ui.visuals().warn_fg_color),
+            );
         }
         // The file dialog's answer.
         if let Some((i, rx)) = &self.browsing {
@@ -369,6 +587,49 @@ mod tests {
         assert!(names.contains(&"esc") && names.contains(&"f24"));
         assert!(!names.contains(&"logo"));
         assert!(names.iter().all(|n| crate::inject::key_named(n).is_some()));
+    }
+
+    #[test]
+    fn recorded_keys_become_taps_holds_and_waits() {
+        let mut r = Recording::default();
+        r.key(0.0, "left_ctrl", true);
+        // Ctrl+C: its press arrives as "copy", only the release as a key.
+        r.key(0.1, "c", false);
+        r.key(0.2, "left_ctrl", false);
+        r.key(1.0, "a", true);
+        r.key(1.05, "a", false);
+        r.key(1.06, "b", true);
+        let steps = r.steps(true, 1.2);
+        assert_eq!(
+            steps,
+            [
+                Step::Down("left_ctrl".into()),
+                Step::Delay(100),
+                Step::Tap("c".into()),
+                Step::Delay(100),
+                Step::Up("left_ctrl".into()),
+                Step::Delay(800),
+                Step::Tap("a".into()),
+                Step::Tap("b".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn without_pauses_there_are_no_waits() {
+        let mut r = Recording::default();
+        r.key(0.0, "x", true);
+        r.key(0.5, "x", false);
+        assert_eq!(r.steps(false, 1.0), [Step::Tap("x".into())]);
+    }
+
+    #[test]
+    fn every_recorded_key_name_is_typeable() {
+        use egui::Key as K;
+        for k in [K::A, K::Num0, K::F24, K::Backslash, K::IntlBackslash, K::SuperRight] {
+            let n = key_name(k).unwrap();
+            assert!(crate::inject::key_named(n).is_some(), "{n}");
+        }
     }
 
     #[test]

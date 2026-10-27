@@ -272,8 +272,10 @@ headset buttons' actions), `{ macro = "name" }`. Macro steps:
 press to the next; one runs at a time, and any key it left down is released
 when it ends. The settings window picks the actions (the G-keys tab) and
 makes the macros (the Macros tab: steps added, reordered and
-removed; renaming a macro follows into the G-keys, and one in use cannot be
-deleted). Typing goes in as if from a keyboard, so it does not reach
+removed, or recorded from keys pressed in the window, pauses optionally kept
+as waits; renaming a macro follows into the G-keys, and one in use cannot be
+deleted). Recording sees only the settings window's own keys while it has
+the focus: no hook, nothing outside it. Typing goes in as if from a keyboard, so it does not reach
 a window running as administrator. Windows 11's Notepad sometimes shows
 typed text cut short or garbled; other programs show all of it.
 
