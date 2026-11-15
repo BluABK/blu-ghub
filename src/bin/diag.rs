@@ -22,6 +22,8 @@ fn usage() -> &'static str {
      BluGHub-diag restore-sector SECTOR FILE put a saved sector back\n\n\
      Lighting (nothing stored; a power cycle undoes it):\n  \
      BluGHub-diag light-test [--claim]       paint Escape red over the stored layout\n\n\
+     The keyboard's lighting timers (reads; set asks first):\n  \
+     BluGHub-diag power-config [set IDLE SLEEP]   dim and lights-off, in seconds\n\n\
      The headset's sound in Windows (Logitech's audio processing; nothing sent to it):\n  \
      BluGHub-diag apo-eq [set G1 .. G10 | restore FILE]   its equaliser\n\n\
      The keyboard's mode (asks before switching; switches back on Enter):\n  \
@@ -29,7 +31,8 @@ fn usage() -> &'static str {
      BluGHub-diag host-test --divert         the same with the G-keys taken, and 90 s idle\n  \
      BluGHub-diag host-test --restore        put the keyboard back in on-board mode\n\n\
      caps, keys and sniff send nothing to any device; probe, dump-onboard and slots send\n\
-     read requests only; only the commands under the last three headings write.\n\
+     read requests only, as does power-config without set; the others write as their\n\
+     headings say.\n\
      Logs go to %APPDATA%\\BluGHub\\diag\\."
 }
 
@@ -88,6 +91,7 @@ fn main() -> Result<()> {
         ["light-test"] => blu_ghub::diag::light::run(claim),
         ["slots"] => blu_ghub::diag::slots::run(),
         ["apo-eq", more @ ..] => blu_ghub::diag::apo::run(more),
+        ["power-config", more @ ..] => blu_ghub::diag::power::run(more),
         ["host-test"] if restore && (leave || divert) => {
             bail!("--restore goes on its own")
         }

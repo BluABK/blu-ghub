@@ -114,6 +114,14 @@ Effect indices differ per cluster; always look them up. Software control
 (fn5 get) reads `00`: the keyboard drives its own lighting. Power config (fn7
 get): idle 60 s, sleep 300 s.
 
+fn7 is `[getOrSet, flags (2), idle (2), sleep (2)]`, seconds big-endian:
+`[00]` reads (`00 00 00 00 3C 01 2C`), `[01 00 00 idle sleep]` sets, as
+Solaar does (`lib/logitech_receiver/rgb_power.py`). Idle is the dim, sleep
+the lighting going off, both counted from the last key. Verified with
+`BluGHub-diag power-config set 30 120`: the reply was `01 00 ...`, it read
+back 30/120, and the lighting went off after about 2 minutes; after a power
+cycle it read 60/300 again, so the values are held in RAM only.
+
 **Stored.** The per-key layout survives a power-cycle: the keys cluster runs
 the on-board *custom* effect (0x000C), whose per-key data lives outside the
 profile sectors below, in one of two slots (Brightness + 8 and + 9 on the

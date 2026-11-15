@@ -339,6 +339,7 @@ and work with nothing installed. These commands change them:
 | `BluGHub-diag write-test 2` | Writes profile 2 back unchanged, to prove the write path. |
 | `BluGHub-diag restore-sector 2 FILE` | Puts a saved copy of a profile back. |
 | `BluGHub-diag host-test [--leave]` | Tries the keyboard's host mode (software drives it, as G HUB does with its on-board memory off): asks for the word HOST first, lights M1, paints Escape red in its memory, and switches back to on-board mode on Enter. `--leave` stays in host mode, to see whether a power cycle ends it. |
+| `BluGHub-diag power-config [set IDLE SLEEP]` | Reads the G915's lighting timers (0x8071 fn7): when it dims, and when it switches its lighting off, in seconds from the last key. `set` asks first, then sets both and reads them back. |
 | `BluGHub-diag apo-eq [set G1 .. G10 \| restore FILE]` | Shows the equaliser of Logitech's audio processing on the G935's playback endpoint (what Windows plays the headset through); `set` saves it to a file first and sets the 10 gains in dB, `restore` puts a saved one back. Nothing is sent to the headset. |
 | `BluGHub-diag host-test --divert` | The same, with the G-keys taken as the tray app takes them: asks for the M1 light, waits 90 s with the keyboard untouched, asks for the M3 light, then hands the G-keys back and switches to on-board mode. |
 | `BluGHub-diag host-test --restore` | Hands the G-keys back, says which mode the keyboard is in, and puts it back in on-board mode. |

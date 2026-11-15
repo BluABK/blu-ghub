@@ -9,6 +9,7 @@ pub mod host;
 pub mod keys;
 pub mod light;
 pub mod onboard;
+pub mod power;
 pub mod probe;
 pub mod slots;
 pub mod sniff;
