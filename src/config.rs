@@ -29,6 +29,61 @@ pub struct Config {
 pub struct Keyboard {
     pub lighting: KeyboardLighting,
     pub gkeys: crate::gkeys::GKeys,
+    pub power: KeyboardPower,
+}
+
+/// When the G915's lighting dims and goes off. Unset: the keyboard's own
+/// timers (it forgets ours at a power cycle, so they are sent at every
+/// connect and wake), and blu-ghub's layout never dims.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct KeyboardPower {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dim: Option<Dim>,
+    /// Seconds without a key press until the keyboard switches its
+    /// lighting off (its own sleep, 0x8071 fn7).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lights_off_after: Option<u32>,
+}
+
+/// Dimming when idle. blu-ghub's layout fades to `to` % over `fade`
+/// seconds once nothing (keyboard or mouse) was touched for `after`
+/// seconds; with its stored layout the keyboard dims by itself after
+/// `after` seconds without a key, to its own level.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Dim {
+    pub after: u32,
+    pub fade: f32,
+    pub to: u8,
+}
+
+impl Default for Dim {
+    fn default() -> Self {
+        Dim { after: 60, fade: 3.0, to: 25 }
+    }
+}
+
+impl KeyboardPower {
+    pub const AFTER: std::ops::RangeInclusive<u32> = 5..=3600;
+    pub const FADE: std::ops::RangeInclusive<f32> = 0.0..=60.0;
+    pub const LIGHTS_OFF: std::ops::RangeInclusive<u32> = 10..=65535;
+
+    fn sanitized(mut self) -> Self {
+        if let Some(d) = &mut self.dim {
+            d.after = d.after.clamp(*Self::AFTER.start(), *Self::AFTER.end());
+            d.fade = if d.fade.is_finite() {
+                d.fade.clamp(*Self::FADE.start(), *Self::FADE.end())
+            } else {
+                Dim::default().fade
+            };
+            d.to = d.to.min(100);
+        }
+        if let Some(s) = &mut self.lights_off_after {
+            *s = (*s).clamp(*Self::LIGHTS_OFF.start(), *Self::LIGHTS_OFF.end());
+        }
+        self
+    }
 }
 
 /// A per-key layout for the G915, by key name ([`crate::keymap`]), and
@@ -189,6 +244,7 @@ impl Config {
             clamp("low_battery_percent", s.low_battery_percent as u64, 0, 100) as u8;
         s.battery_check_minutes = clamp("battery_check_minutes", s.battery_check_minutes, 5, 1440);
         s.log_retention_days = clamp("log_retention_days", s.log_retention_days, 1, 3650);
+        self.keyboard.power = self.keyboard.power.sanitized();
         self.keyboard.lighting.keys.retain(|name, _| {
             let known = crate::keymap::by_name(name).is_some();
             if !known {
@@ -397,6 +453,34 @@ mod tests {
         let s = c.headset.sidetone.unwrap();
         assert_eq!((s.level, s.applied()), (40, 0));
         assert_eq!(Config::default().headset.sidetone, None);
+        let again: Config = toml::from_str(&toml::to_string(&c).unwrap()).unwrap();
+        assert_eq!(again, c);
+    }
+
+    #[test]
+    fn keyboard_power_reads_and_is_kept_in_range() {
+        let c: Config = toml::from_str(
+            "[keyboard.power]
+lights_off_after = 1
+
+[keyboard.power.dim]
+after = 99999
+             fade = -1.0
+to = 150
+",
+        )
+        .unwrap();
+        let p = c.sanitized().keyboard.power;
+        assert_eq!(p.lights_off_after, Some(10));
+        assert_eq!(p.dim, Some(Dim { after: 3600, fade: 0.0, to: 100 }));
+        let c: Config = toml::from_str(
+            "[keyboard.power.dim]
+after = 30
+",
+        )
+        .unwrap();
+        assert_eq!(c.keyboard.power.dim, Some(Dim { after: 30, ..Dim::default() }));
+        assert_eq!(Config::default().keyboard.power, KeyboardPower::default());
         let again: Config = toml::from_str(&toml::to_string(&c).unwrap()).unwrap();
         assert_eq!(again, c);
     }

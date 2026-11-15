@@ -125,6 +125,10 @@ const RELEASE: [u8; 3] = [0x01, 0x00, 0x00];
 /// is handed back and the keyboard shows its stored layout at once.
 struct Painter {
     own: Option<Vec<(u8, Rgb)>>,
+    /// How bright blu-ghub's layout and overlay are shown (1 = as they
+    /// are): below 1 while dimmed. With no layout of blu-ghub's, dimmed
+    /// hands the lighting back, and the keyboard dims its own.
+    level: f32,
     /// Keys painted over whatever else is shown: the bank on G1-G5.
     overlay: Option<Vec<(u8, Rgb)>>,
     feat: Option<u8>,
@@ -140,6 +144,7 @@ impl Painter {
     fn new(own: Option<Vec<(u8, Rgb)>>) -> Self {
         Painter {
             own,
+            level: 1.0,
             overlay: None,
             feat: None,
             effects: None,
@@ -155,13 +160,23 @@ impl Painter {
             return Some(p);
         }
         let base = self.own.clone();
-        if base.is_none() && self.overlay.is_none() {
+        if base.is_none() && (self.overlay.is_none() || self.level < 1.0) {
             return None;
         }
         let mut keys: std::collections::BTreeMap<u8, Rgb> =
             base.unwrap_or_default().into_iter().collect();
         keys.extend(self.overlay.iter().flatten().copied());
-        Some(keys.into_iter().collect())
+        let level = self.level.clamp(0.0, 1.0);
+        Some(
+            keys.into_iter()
+                .map(|(z, c)| (z, Rgb(c.0.map(|v| (f32::from(v) * level).round() as u8))))
+                .collect(),
+        )
+    }
+
+    /// Does blu-ghub show anything (and so dims it)?
+    fn shows(&self) -> bool {
+        self.own.is_some() || self.overlay.is_some()
     }
 
     /// The keyboard went to sleep or away: the claim and what it showed are
@@ -542,6 +557,7 @@ pub struct KeyboardSetup {
     pub gkeys: super::keyboard_gkeys::Setup,
     /// blu-ghub's layout, to keep shown; `None`: the keyboard's own.
     pub layout: Option<Vec<(u8, Rgb)>>,
+    pub power: crate::config::KeyboardPower,
 }
 
 /// Start a worker for `link` if its hardware is among `all`.
@@ -646,6 +662,8 @@ struct KeyboardParts {
     updates: UpdateSlot,
     /// The details that do not change, once read.
     fixed: Option<super::details::Details>,
+    power: crate::config::KeyboardPower,
+    dimmer: super::dimmer::Dimmer,
 }
 
 fn keyboard(
@@ -662,6 +680,8 @@ fn keyboard(
         painter: Painter::new(setup.layout),
         updates,
         fixed: None,
+        power: setup.power,
+        dimmer: super::dimmer::Dimmer::new(setup.power.dim),
     };
     keyboard_loop(&mut ch, link, dev, rep, poll, &mut parts);
     // However the loop ended: hand the G-keys and the lighting back.
@@ -677,10 +697,26 @@ fn keyboard_loop(
     poll: Duration,
     parts: &mut KeyboardParts,
 ) {
-    let KeyboardParts { gkeys, painter, updates, fixed } = parts;
-    // The details were read since the keyboard last connected.
+    let KeyboardParts { gkeys, painter, updates, fixed, power, dimmer } = parts;
+    // The details were read, and the lighting timers sent, since the
+    // keyboard last connected.
     let mut details_read = false;
+    let mut timers_set = false;
     let name = link.label();
+    // Look at the idle time again, and repaint at the dimmer's level if it
+    // changed; with nothing of blu-ghub's shown, the keyboard dims itself.
+    let dim = |dimmer: &mut super::dimmer::Dimmer, painter: &mut Painter, ch: &mut Channel| {
+        if !painter.shows() {
+            dimmer.stop();
+            painter.level = 1.0;
+            return;
+        }
+        if let Some(level) = dimmer.tick(super::dimmer::idle_for(), Instant::now()) {
+            debug!("{name}: lighting at {:.0} %", level * 100.0);
+            painter.level = level;
+            painter.paint(ch, dev, name);
+        }
+    };
     let wireless = link == Link::KeyboardReceiver;
     if wireless {
         enable_link_notifications(ch);
@@ -726,8 +762,15 @@ fn keyboard_loop(
                         s.battery = Some(b);
                     });
                     gkeys.settle(ch, dev);
+                    if !timers_set {
+                        timers_set = true;
+                        super::dimmer::set_timers(ch, dev, power, name);
+                    }
                     painter.overlay = gkeys.indicator();
                     painter.paint(ch, dev, name);
+                    if dimmer.due().is_none() {
+                        dim(dimmer, painter, ch);
+                    }
                     if !details_read {
                         details_read = true;
                         let mut d = fixed
@@ -764,12 +807,22 @@ fn keyboard_loop(
             }
         }
 
-        match ch.wait_event(wait_for(connected, due, poll)) {
+        let wait = wait_for(connected, due, poll).map(|w| match dimmer.due() {
+            Some(d) => w.min(d.saturating_duration_since(Instant::now())),
+            None => w,
+        });
+        match ch.wait_event(wait) {
             Err(e) => {
                 info!("{name}: {e}");
                 return;
             }
-            Ok(None) => need_read = connected,
+            Ok(None) => {
+                let now = Instant::now();
+                if connected && dimmer.due().is_some_and(|d| d <= now) {
+                    dim(dimmer, painter, ch);
+                }
+                need_read = connected && due.is_none_or(|d| d <= now);
+            }
             Ok(Some(Event::Control(QUIT))) => return,
             Ok(Some(Event::Control(PREVIEW))) => {
                 if connected {
@@ -788,8 +841,21 @@ fn keyboard_loop(
                     }
                     painter.own = s.layout;
                     painter.overlay = gkeys.indicator();
+                    if s.power != *power {
+                        *power = s.power;
+                        dimmer.set(power.dim);
+                        timers_set = false;
+                    }
                     if connected {
+                        // Changing settings is input: bright, then timed.
+                        dimmer.activity(Instant::now());
+                        painter.level = 1.0;
                         painter.paint(ch, dev, name);
+                        dim(dimmer, painter, ch);
+                        if !timers_set {
+                            timers_set = true;
+                            super::dimmer::set_timers(ch, dev, power, name);
+                        }
                     }
                 }
             }
@@ -800,10 +866,19 @@ fn keyboard_loop(
             Ok(Some(Event::Report(r))) => {
                 let d = &r.data;
                 if let Some(p) = gkeys.event_feature().and_then(|g| event_payload(d, dev, g)) {
+                    // Windows does not see a G-key taken by blu-ghub as input.
+                    if let Some(level) = dimmer.activity(Instant::now()) {
+                        painter.level = level;
+                        painter.paint(ch, dev, name);
+                    }
                     gkeys.on_keys(ch, dev, p[0]);
                     continue;
                 }
                 if let Some(p) = gkeys.mkey_feature().and_then(|m| event_payload(d, dev, m)) {
+                    if let Some(level) = dimmer.activity(Instant::now()) {
+                        painter.level = level;
+                        painter.paint(ch, dev, name);
+                    }
                     if gkeys.on_mkeys(ch, dev, p[0]) {
                         painter.overlay = gkeys.indicator();
                         painter.paint(ch, dev, name);
@@ -828,7 +903,10 @@ fn keyboard_loop(
                         painter.forget();
                         gkeys.forget();
                         painter.overlay = None;
+                        painter.level = 1.0;
+                        dimmer.stop();
                         details_read = false;
+                        timers_set = false;
                         rep.update(link, |s| s.state = State::Sleeping);
                     }
                 } else if let Some(p) = battery_idx.and_then(|i| event_payload(d, dev, i)) {

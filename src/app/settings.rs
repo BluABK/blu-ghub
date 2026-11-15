@@ -383,6 +383,8 @@ impl eframe::App for Settings {
                 Tab::Layout => {
                     self.keyboard_lighting(ui);
                     ui.add_space(8.0);
+                    self.keyboard_power(ui);
+                    ui.add_space(8.0);
                     self.editor.show(ui, &mut self.draft.keyboard.lighting.keys);
                     ui.add_space(12.0);
                     self.save_row(ui);
@@ -447,6 +449,76 @@ struct GHub {
 }
 
 impl Settings {
+    /// Dimming when idle, and when the lighting goes off.
+    fn keyboard_power(&mut self, ui: &mut egui::Ui) {
+        use crate::config::{Dim, KeyboardPower};
+        let p = &mut self.draft.keyboard.power;
+        ui.horizontal(|ui| {
+            let mut on = p.dim.is_some();
+            if ui
+                .checkbox(&mut on, "Dim after")
+                .on_hover_text(
+                    "blu-ghub's layout fades once nothing (keyboard or mouse) was touched for \
+                     this long, and is bright again at the next touch. With its stored layout \
+                     the keyboard dims by itself after this long without a key, to its own \
+                     level, at once.",
+                )
+                .changed()
+            {
+                p.dim = on.then(Dim::default);
+            }
+            let mut d = p.dim.unwrap_or_default();
+            ui.add_enabled_ui(on, |ui| {
+                ui.add(egui::DragValue::new(&mut d.after).range(KeyboardPower::AFTER).suffix(" s"));
+                ui.label("idle, fading over");
+                ui.add(
+                    egui::DragValue::new(&mut d.fade)
+                        .range(KeyboardPower::FADE)
+                        .speed(0.1)
+                        .max_decimals(1)
+                        .suffix(" s"),
+                );
+                ui.label("to");
+                ui.add(egui::DragValue::new(&mut d.to).range(0..=100).suffix(" %"))
+                    .on_hover_text("Of the layout's own brightness; 0 is dark.");
+            });
+            if on {
+                p.dim = Some(d);
+            }
+        });
+        ui.horizontal(|ui| {
+            let mut on = p.lights_off_after.is_some();
+            if ui
+                .checkbox(&mut on, "Lighting off after")
+                .on_hover_text(
+                    "The keyboard's own sleep: its lighting goes off this long after the last \
+                     key, and comes back at the next. Unticked: the keyboard's own time (5 \
+                     minutes on this model), which it also goes back to when switched off and \
+                     on.",
+                )
+                .changed()
+            {
+                p.lights_off_after = on.then_some(300);
+            }
+            let mut s = p.lights_off_after.unwrap_or(300);
+            ui.add_enabled_ui(on, |ui| {
+                ui.add(egui::DragValue::new(&mut s).range(KeyboardPower::LIGHTS_OFF).suffix(" s"));
+                ui.label("without a key");
+            });
+            if on {
+                p.lights_off_after = Some(s);
+            }
+        });
+        if let (Some(d), Some(off)) = (p.dim, p.lights_off_after)
+            && d.after >= off
+        {
+            ui.label(
+                egui::RichText::new("The lighting goes off before it would dim.")
+                    .color(ui.visuals().warn_fg_color),
+            );
+        }
+    }
+
     fn keyboard_lighting(&mut self, ui: &mut egui::Ui) {
         if self.draft.keyboard.lighting.keys.is_empty() {
             ui.label("No layout of blu-ghub's own yet: import one from G HUB to start from.");
@@ -458,9 +530,9 @@ impl Settings {
                 .on_hover_text("blu-ghub sends the keyboard nothing.");
             ui.radio_value(&mut l.show, ShowLayout::Layout, "this layout").on_hover_text(
                 "Painted whenever the keyboard connects or wakes, into its memory only, with \
-                 its own effects held off meanwhile (it still sleeps after its 5 minutes, but \
-                 does not dim after 1). Without blu-ghub running, the keyboard shows its stored \
-                 layout.",
+                 its own effects held off meanwhile: it dims only as \"Dim after\" says, and \
+                 still goes dark when it sleeps. Without blu-ghub running, the keyboard shows \
+                 its stored layout.",
             );
         });
         let saved = self.saved.keyboard.lighting.show;

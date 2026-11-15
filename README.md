@@ -171,6 +171,14 @@ esc = "#2a6fd4"
 f1 = "#d42a8c"
 logo = "#2a6fd4"
 
+[keyboard.power]
+lights_off_after = 600        # seconds without a key; left out: the keyboard's own
+
+[keyboard.power.dim]          # left out: the layout above never dims
+after = 45                    # seconds idle (keyboard or mouse)
+fade = 4.0                    # seconds the fade takes
+to = 20                       # percent of the layout's brightness
+
 [keyboard.gkeys]
 show_bank = true              # G1-G5 in the bank's colour while blu-ghub has them
 bank_colors = ["#2080ff", "#30d040", "#ff8010"]   # M1, M2, M3
@@ -232,6 +240,19 @@ minute), for the lighting only: the keyboard still sleeps after its five
 minutes, but no longer dims after one. It is painted into the keyboard's
 memory only, so nothing is stored: without blu-ghub running, and for a
 moment at each wake, the keyboard shows its stored layout.
+
+`[keyboard.power]` (the *Dim after* and *Lighting off after* rows in the
+*G915 layout* tab) sets when the lighting dims and goes off. With `dim`,
+blu-ghub's layout fades to `to` % over `fade` seconds once nothing,
+keyboard or mouse, was touched for `after` seconds (Windows' last-input
+time, looked at once when the dim is due and four times a second while
+dimmed; no hook), and is bright again at the next touch, a G-key or M key
+included. With the keyboard's stored layout, the keyboard dims by itself
+after `after` seconds without a key, at once and to its own level.
+`lights_off_after` is the keyboard's own sleep, counted from its last key.
+The keyboard forgets both times when switched off, so blu-ghub sends them at
+every connect and wake; unset, it keeps its own (dim after 60 s, off after
+300 s on this model).
 
 While the *G915 layout* tab is open, the window has the focus and *this
 layout* is picked, the layout being edited is shown on the keyboard as it

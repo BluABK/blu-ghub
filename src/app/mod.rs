@@ -15,6 +15,7 @@
 
 pub mod details;
 pub mod devices;
+mod dimmer;
 mod eq_presets;
 mod eq_widget;
 mod keyboard_editor;
@@ -154,6 +155,7 @@ fn keyboard_setup(c: &Config) -> devices::KeyboardSetup {
     devices::KeyboardSetup {
         gkeys: keyboard_gkeys::Setup { gkeys: c.keyboard.gkeys.clone(), macros: c.macros.clone() },
         layout: c.keyboard.lighting.shown(),
+        power: c.keyboard.power,
     }
 }
 
