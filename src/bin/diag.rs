@@ -18,7 +18,7 @@ fn usage() -> &'static str {
      Writing the keyboard's on-board memory (each saves a backup first and\n\
      verifies the result):\n  \
      BluGHub-diag write-test SECTOR          write a profile back unchanged\n  \
-     BluGHub-diag set-gkeys SECTOR G3=F15 G5=LCtrl G1=off ...\n  \
+     BluGHub-diag set-gkeys SECTOR G2=F17 G4=LShift G1=off ...\n  \
      BluGHub-diag restore-sector SECTOR FILE put a saved sector back\n\n\
      Lighting (nothing stored; a power cycle undoes it):\n  \
      BluGHub-diag light-test [--claim]       paint Escape red over the stored layout\n\n\

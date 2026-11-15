@@ -3,6 +3,7 @@ name = "blu-ghub"
 version = "0.1.0"
 edition = "2024"
 description = "Lightweight replacement for Logitech G HUB: battery, lighting and G-keys for a G915 and a G935"
+license = "MIT OR Apache-2.0"
 build = "build.rs"
 
 # The package stays lowercase (idiomatic for a crate); the *binaries* carry the

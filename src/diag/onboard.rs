@@ -65,7 +65,7 @@ pub fn write_test(sector: u16) -> Result<()> {
     Ok(())
 }
 
-/// Change G-keys in profile `sector`: `assignments` like `["G3=F15", "G5=LCtrl"]`.
+/// Change G-keys in profile `sector`: `assignments` like `["G2=F17", "G4=LShift"]`.
 pub fn set_gkeys(sector: u16, assignments: &[&str]) -> Result<()> {
     let mut changes = Vec::new();
     for a in assignments {

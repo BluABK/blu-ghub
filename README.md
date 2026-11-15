@@ -9,6 +9,15 @@ does, typing suffers. The aim here is the opposite: a program that is idle when
 nothing happens, sends nothing to the devices unless something needs changing,
 and never sits in the keystroke path.
 
+blu-ghub is an independent project, not made, endorsed or supported by
+Logitech. Logitech, G HUB, LIGHTSPEED, G915 and G935 are Logitech's
+trademarks, named here only to say what this works with. It talks to the
+devices through what they already accept from software, worked out from
+open-source projects (Solaar, libratbag, OpenRGB, HeadsetControl, keyleds)
+and from watching the devices; no Logitech code is included. Use
+it at your own risk: the commands that write to a keyboard's memory say so,
+and save a backup first.
+
 ## Status
 
 - **BluGHub** (the tray app): battery levels for the G915 and G935, the
@@ -356,7 +365,7 @@ and work with nothing installed. These commands change them:
 
 | Command | What it does |
 |---|---|
-| `BluGHub-diag set-gkeys 2 G3=F15 G5=LCtrl G1=off` | Sets G-keys in profile 2 (M2). Keys: `F1`-`F24`, `LCtrl` `LShift` `LAlt` `LWin` (and `R...`), `off`, or `usage:0xNN`. |
+| `BluGHub-diag set-gkeys 2 G2=F17 G4=LShift G1=off` | Sets G-keys in profile 2 (M2). Keys: `F1`-`F24`, `LCtrl` `LShift` `LAlt` `LWin` (and `R...`), `off`, or `usage:0xNN`. |
 | `BluGHub-diag write-test 2` | Writes profile 2 back unchanged, to prove the write path. |
 | `BluGHub-diag restore-sector 2 FILE` | Puts a saved copy of a profile back. |
 | `BluGHub-diag host-test [--leave]` | Tries the keyboard's host mode (software drives it, as G HUB does with its on-board memory off): asks for the word HOST first, lights M1, paints Escape red in its memory, and switches back to on-board mode on Enter. `--leave` stays in host mode, to see whether a power cycle ends it. |
@@ -430,3 +439,11 @@ cargo fmt
 
 Windows only. The build cleans stale outputs from its own `target/` folder;
 `TARGET_GC=off|dry|force` steers that.
+
+## Licence
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT), at your option. Unless you say otherwise, any
+contribution you submit for inclusion in this project, as defined in the
+Apache-2.0 license, is dual licensed as above, without any additional terms
+or conditions.
